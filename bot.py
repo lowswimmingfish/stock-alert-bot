@@ -359,6 +359,195 @@ def get_macro_data() -> str:
     return "\n".join(lines)
 
 
+def get_insider_transactions(ticker: str) -> str:
+    """최근 내부자 거래 (임원·대주주 매수/매도)."""
+    try:
+        t = yf.Ticker(ticker)
+        df = t.insider_transactions
+        if df is None or df.empty:
+            return f"{ticker} 내부자 거래 데이터 없음"
+        lines = [f"[{ticker} 최근 내부자 거래]"]
+        for _, row in df.head(8).iterrows():
+            date = str(row.get("Start Date", ""))[:10]
+            name = row.get("Name", "")
+            title = row.get("Position", "")
+            shares = row.get("Shares", 0)
+            value = row.get("Value", 0)
+            txn = row.get("Transaction", "")
+            lines.append(f"{date} | {name}({title}) | {txn} | {shares:,}주 | ${value:,.0f}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"내부자 거래 조회 오류: {e}"
+
+
+def get_institutional_holders(ticker: str) -> str:
+    """주요 기관 보유 현황 (Vanguard, BlackRock 등)."""
+    try:
+        t = yf.Ticker(ticker)
+        df = t.institutional_holders
+        if df is None or df.empty:
+            return f"{ticker} 기관 보유 데이터 없음"
+        lines = [f"[{ticker} 주요 기관 보유 현황]"]
+        for _, row in df.head(10).iterrows():
+            holder = row.get("Holder", "")
+            shares = row.get("Shares", 0)
+            value = row.get("Value", 0)
+            pct = row.get("% Out", 0)
+            chg = row.get("pctChange", 0)
+            lines.append(f"{holder}: {shares:,}주 (지분 {pct:.2%}, 전분기비 {chg:+.2%})")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"기관 보유 조회 오류: {e}"
+
+
+def get_upgrades_downgrades(ticker: str) -> str:
+    """최근 애널리스트 등급 변경 (upgrade/downgrade)."""
+    try:
+        t = yf.Ticker(ticker)
+        df = t.upgrades_downgrades
+        if df is None or df.empty:
+            return f"{ticker} 등급 변경 데이터 없음"
+        lines = [f"[{ticker} 최근 애널리스트 등급 변경]"]
+        for date, row in df.head(8).iterrows():
+            firm = row.get("Firm", "")
+            to_grade = row.get("ToGrade", "")
+            from_grade = row.get("FromGrade", "")
+            action = row.get("Action", "")
+            target = row.get("currentPriceTarget", "")
+            prior = row.get("priorPriceTarget", "")
+            date_str = str(date)[:10]
+            target_str = f" | 목표가: ${prior}→${target}" if target else ""
+            lines.append(f"{date_str} | {firm} | {from_grade}→{to_grade} ({action}){target_str}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"등급 변경 조회 오류: {e}"
+
+
+def get_financials(ticker: str) -> str:
+    """최근 4분기 재무제표 요약 (매출, 영업이익, 순이익, FCF)."""
+    try:
+        t = yf.Ticker(ticker)
+        lines = [f"[{ticker} 재무제표 요약]"]
+
+        # 손익계산서
+        inc = t.quarterly_income_stmt
+        if inc is not None and not inc.empty:
+            lines.append("\n<손익계산서 (분기)>")
+            rows_to_show = ["Total Revenue", "Operating Income", "Net Income"]
+            for row_name in rows_to_show:
+                if row_name in inc.index:
+                    row = inc.loc[row_name].head(4)
+                    vals = " | ".join([f"{v/1e9:.2f}B" if abs(v) >= 1e9 else f"{v/1e6:.0f}M" for v in row])
+                    lines.append(f"  {row_name}: {vals}")
+
+        # 현금흐름
+        cf = t.quarterly_cashflow
+        if cf is not None and not cf.empty:
+            lines.append("\n<현금흐름 (분기)>")
+            cf_rows = ["Free Cash Flow", "Operating Cash Flow"]
+            for row_name in cf_rows:
+                if row_name in cf.index:
+                    row = cf.loc[row_name].head(4)
+                    vals = " | ".join([f"{v/1e9:.2f}B" if abs(v) >= 1e9 else f"{v/1e6:.0f}M" for v in row])
+                    lines.append(f"  {row_name}: {vals}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"재무제표 조회 오류: {e}"
+
+
+def get_options_summary(ticker: str) -> str:
+    """가장 가까운 만기의 옵션 체인 요약 (Put/Call ratio, 주요 행사가)."""
+    try:
+        t = yf.Ticker(ticker)
+        expirations = t.options
+        if not expirations:
+            return f"{ticker} 옵션 데이터 없음"
+
+        # 가장 가까운 만기
+        exp = expirations[0]
+        chain = t.option_chain(exp)
+        calls = chain.calls
+        puts = chain.puts
+
+        # 현재가 기준 ATM 옵션
+        info = t.fast_info
+        current = getattr(info, "last_price", None)
+
+        lines = [f"[{ticker} 옵션 요약 - 만기: {exp}]"]
+        if current:
+            lines.append(f"현재가: ${current:.2f}")
+
+        # Put/Call ratio (OI 기준)
+        total_call_oi = calls["openInterest"].sum()
+        total_put_oi = puts["openInterest"].sum()
+        pc_ratio = total_put_oi / total_call_oi if total_call_oi > 0 else 0
+        lines.append(f"Put/Call OI 비율: {pc_ratio:.2f} (1 초과 = 풋 우세 = 하락 헤지 많음)")
+
+        # 콜 상위 5개 (OI 기준)
+        top_calls = calls.nlargest(5, "openInterest")[["strike", "lastPrice", "openInterest", "impliedVolatility"]]
+        lines.append("\n콜 상위 OI:")
+        for _, r in top_calls.iterrows():
+            lines.append(f"  행사가 ${r['strike']:.0f} | 프리미엄 ${r['lastPrice']:.2f} | OI {r['openInterest']:,} | IV {r['impliedVolatility']:.1%}")
+
+        # 풋 상위 5개 (OI 기준)
+        top_puts = puts.nlargest(5, "openInterest")[["strike", "lastPrice", "openInterest", "impliedVolatility"]]
+        lines.append("\n풋 상위 OI:")
+        for _, r in top_puts.iterrows():
+            lines.append(f"  행사가 ${r['strike']:.0f} | 프리미엄 ${r['lastPrice']:.2f} | OI {r['openInterest']:,} | IV {r['impliedVolatility']:.1%}")
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"옵션 조회 오류: {e}"
+
+
+def get_dividend_history(ticker: str) -> str:
+    """배당 이력 및 배당률."""
+    try:
+        t = yf.Ticker(ticker)
+        divs = t.dividends
+        if divs is None or divs.empty:
+            return f"{ticker} 배당 데이터 없음 (무배당 종목)"
+        info = t.info
+        lines = [f"[{ticker} 배당 정보]"]
+        lines.append(f"배당수익률: {info.get('dividendYield', 0)*100:.2f}%")
+        lines.append(f"연간 배당금: ${info.get('dividendRate', 'N/A')}")
+        lines.append(f"배당성향: {info.get('payoutRatio', 0)*100:.1f}%")
+        lines.append("\n최근 배당 이력:")
+        for date, amount in divs.tail(8).items():
+            lines.append(f"  {str(date)[:10]}: ${amount:.4f}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"배당 조회 오류: {e}"
+
+
+def get_ticker_news(ticker: str) -> str:
+    """yfinance에서 종목 전용 최신 뉴스 가져오기."""
+    try:
+        t = yf.Ticker(ticker)
+        news = t.news or []
+        if not news:
+            return f"{ticker} 뉴스 없음"
+        lines = [f"[{ticker} 최신 뉴스]"]
+        for n in news[:8]:
+            content = n.get("content", {})
+            if isinstance(content, dict):
+                title = content.get("title", "")
+                pub = content.get("pubDate", "")[:10]
+                summary = content.get("summary", "")
+            else:
+                title = n.get("title", "")
+                pub = ""
+                summary = ""
+            if title:
+                lines.append(f"[{pub}] {title}")
+                if summary:
+                    lines.append(f"  → {summary[:120]}")
+        return "\n".join(lines)
+    except Exception as e:
+        return f"뉴스 조회 오류: {e}"
+
+
 # ──────────────────────────────────────────────
 # Claude tool definitions
 # ──────────────────────────────────────────────
@@ -442,6 +631,83 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "get_insider_transactions",
+        "description": "임원·대주주 내부자 매수/매도 내역. 스마트머니 흐름 파악에 유용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_institutional_holders",
+        "description": "Vanguard, BlackRock 등 주요 기관 보유 지분 및 전분기 대비 변화.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_upgrades_downgrades",
+        "description": "최근 애널리스트 등급 변경 이력 (업그레이드/다운그레이드, 목표주가 변경).",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_financials",
+        "description": "분기별 재무제표 요약: 매출, 영업이익, 순이익, FCF. 실적 추이 파악에 사용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_options_summary",
+        "description": "옵션 체인 요약: Put/Call ratio, 주요 행사가별 OI. 시장 기대 방향 파악에 유용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_dividend_history",
+        "description": "배당 이력, 배당수익률, 배당성향 조회.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_ticker_news",
+        "description": "yfinance 종목 전용 최신 뉴스 (제목+요약). 특정 종목 뉴스를 빠르게 볼 때.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
 ]
 
 
@@ -461,6 +727,20 @@ def run_tool(tool_name: str, tool_input: dict) -> str:
         return get_fear_greed()
     elif tool_name == "get_macro_data":
         return get_macro_data()
+    elif tool_name == "get_insider_transactions":
+        return get_insider_transactions(tool_input["ticker"])
+    elif tool_name == "get_institutional_holders":
+        return get_institutional_holders(tool_input["ticker"])
+    elif tool_name == "get_upgrades_downgrades":
+        return get_upgrades_downgrades(tool_input["ticker"])
+    elif tool_name == "get_financials":
+        return get_financials(tool_input["ticker"])
+    elif tool_name == "get_options_summary":
+        return get_options_summary(tool_input["ticker"])
+    elif tool_name == "get_dividend_history":
+        return get_dividend_history(tool_input["ticker"])
+    elif tool_name == "get_ticker_news":
+        return get_ticker_news(tool_input["ticker"])
     return "알 수 없는 도구입니다."
 
 
@@ -481,13 +761,20 @@ def ask_claude(question, config):
 - **최신 뉴스/이슈** → news_search (영어로 검색하면 더 풍부한 결과)
 - **기업·시황 정보** → web_search
 - **기사 전문 확인** → fetch_url (검색에서 찾은 URL을 직접 읽기)
+- **종목 최신 뉴스** → get_ticker_news
 - **PER·EPS·목표가** → get_stock_info
+- **분기 재무제표** → get_financials
 - **실적 발표 일정** → get_earnings_calendar
+- **애널리스트 등급 변경** → get_upgrades_downgrades
+- **내부자 매수/매도** → get_insider_transactions
+- **기관 보유 현황** → get_institutional_holders
+- **옵션 Put/Call 비율** → get_options_summary
+- **배당 이력** → get_dividend_history
 - **시장 심리 파악** → get_fear_greed
 - **금리·VIX·달러·금·원유** → get_macro_data
 
 여러 도구를 순서대로 조합해서 깊이 있는 답변을 줘.
-예) 뉴스 검색 → URL 읽기 → 펀더멘털 확인 → 종합 의견
+예) get_ticker_news → get_upgrades_downgrades → get_financials → 종합 의견
 
 투자 조언 시 "개인적인 의견이며 투자 판단은 본인 책임"이라는 점을 명시해.
 
