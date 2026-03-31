@@ -8,6 +8,7 @@ import anthropic
 import yfinance as yf
 from pykrx import stock as pykrx_stock
 from duckduckgo_search import DDGS
+from bs4 import BeautifulSoup
 from pathlib import Path
 from datetime import datetime, timedelta
 
@@ -141,9 +142,29 @@ def get_live_prices(config):
     return "\n".join(lines)
 
 
+# ──────────────────────────────────────────────
+# Tool implementations
+# ──────────────────────────────────────────────
+
 def web_search(query: str, max_results: int = 5) -> str:
-    """Search the web using DuckDuckGo and return formatted results."""
+    """Search the web using DuckDuckGo."""
     try:
+        # Tavily가 설정돼 있으면 우선 사용
+        config = load_config()
+        tavily_key = config.get("tavily_api_key", "")
+        if tavily_key:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=tavily_key)
+            resp = client.search(query, max_results=max_results)
+            lines = []
+            for r in resp.get("results", []):
+                lines.append(f"제목: {r.get('title', '')}")
+                lines.append(f"내용: {r.get('content', '')}")
+                lines.append(f"출처: {r.get('url', '')}")
+                lines.append("")
+            return "\n".join(lines) or "결과 없음"
+
+        # fallback: DuckDuckGo
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         if not results:
@@ -160,16 +181,30 @@ def web_search(query: str, max_results: int = 5) -> str:
 
 
 def news_search(query: str, max_results: int = 5) -> str:
-    """Search for latest news using DuckDuckGo News."""
+    """Search latest news. Tries Tavily first, falls back to DuckDuckGo."""
     try:
+        config = load_config()
+        tavily_key = config.get("tavily_api_key", "")
+        if tavily_key:
+            from tavily import TavilyClient
+            client = TavilyClient(api_key=tavily_key)
+            resp = client.search(query, max_results=max_results, topic="news")
+            lines = []
+            for r in resp.get("results", []):
+                pub = r.get("published_date", "")
+                lines.append(f"[{pub}] {r.get('title', '')}")
+                lines.append(f"내용: {r.get('content', '')}")
+                lines.append(f"출처: {r.get('url', '')}")
+                lines.append("")
+            return "\n".join(lines) or "결과 없음"
+
         with DDGS() as ddgs:
             results = list(ddgs.news(query, max_results=max_results))
         if not results:
             return "뉴스 결과가 없습니다."
         lines = []
         for r in results:
-            date = r.get("date", "")
-            lines.append(f"[{date}] {r.get('title', '')}")
+            lines.append(f"[{r.get('date', '')}] {r.get('title', '')}")
             lines.append(f"내용: {r.get('body', '')}")
             lines.append(f"출처: {r.get('source', '')} - {r.get('url', '')}")
             lines.append("")
@@ -178,30 +213,233 @@ def news_search(query: str, max_results: int = 5) -> str:
         return f"뉴스 검색 오류: {e}"
 
 
+def fetch_url(url: str) -> str:
+    """Fetch and parse a webpage — returns clean text (max 3000 chars)."""
+    try:
+        headers = {"User-Agent": "Mozilla/5.0 (compatible; StockBot/1.0)"}
+        resp = requests.get(url, headers=headers, timeout=10)
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tag in soup(["script", "style", "nav", "footer", "header"]):
+            tag.decompose()
+        text = soup.get_text(separator="\n", strip=True)
+        # 연속 빈줄 제거
+        lines = [l for l in text.splitlines() if l.strip()]
+        return "\n".join(lines)[:3000]
+    except Exception as e:
+        return f"URL 읽기 오류: {e}"
+
+
+def get_stock_info(ticker: str) -> str:
+    """Return fundamentals: PER, EPS, 목표가, 애널리스트 의견, 52주 고/저."""
+    try:
+        t = yf.Ticker(ticker)
+        info = t.info
+        lines = [f"[{ticker} 펀더멘털]"]
+        fields = {
+            "현재가": "currentPrice",
+            "시가총액": "marketCap",
+            "PER": "trailingPE",
+            "선행PER": "forwardPE",
+            "PBR": "priceToBook",
+            "EPS(TTM)": "trailingEps",
+            "배당수익률": "dividendYield",
+            "52주 최고": "fiftyTwoWeekHigh",
+            "52주 최저": "fiftyTwoWeekLow",
+            "애널리스트 평균목표가": "targetMeanPrice",
+            "애널리스트 의견": "recommendationKey",
+            "매출(TTM)": "totalRevenue",
+            "영업이익률": "operatingMargins",
+        }
+        for label, key in fields.items():
+            val = info.get(key)
+            if val is not None:
+                if key == "marketCap" or key == "totalRevenue":
+                    val = f"${val:,.0f}"
+                elif key == "dividendYield" and val:
+                    val = f"{val*100:.2f}%"
+                elif key == "operatingMargins" and val:
+                    val = f"{val*100:.2f}%"
+                lines.append(f"{label}: {val}")
+
+        # 애널리스트 추천 분포
+        try:
+            rec = t.recommendations
+            if rec is not None and not rec.empty:
+                latest = rec.tail(1).to_dict("records")[0]
+                lines.append(f"추천 분포 - 강매수:{latest.get('strongBuy',0)} 매수:{latest.get('buy',0)} 중립:{latest.get('hold',0)} 매도:{latest.get('sell',0)}")
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"종목 정보 오류: {e}"
+
+
+def get_earnings_calendar(ticker: str) -> str:
+    """Return upcoming / recent earnings info for a ticker."""
+    try:
+        t = yf.Ticker(ticker)
+        cal = t.calendar
+        lines = [f"[{ticker} 실적 캘린더]"]
+        if cal:
+            if isinstance(cal, dict):
+                for k, v in cal.items():
+                    lines.append(f"{k}: {v}")
+            else:
+                lines.append(str(cal))
+        else:
+            lines.append("실적 일정 정보 없음")
+
+        # 최근 실적
+        try:
+            earnings = t.earnings_history
+            if earnings is not None and not earnings.empty:
+                lines.append("\n[최근 실적]")
+                for _, row in earnings.tail(4).iterrows():
+                    lines.append(
+                        f"  {row.name if hasattr(row, 'name') else ''} "
+                        f"예상EPS: {row.get('epsEstimate', 'N/A')} "
+                        f"실제EPS: {row.get('epsActual', 'N/A')} "
+                        f"서프라이즈: {row.get('surprisePercent', 'N/A')}%"
+                    )
+        except Exception:
+            pass
+
+        return "\n".join(lines)
+    except Exception as e:
+        return f"실적 캘린더 오류: {e}"
+
+
+def get_fear_greed() -> str:
+    """Fetch CNN Fear & Greed Index."""
+    try:
+        url = "https://production.dataviz.cnn.io/index/fearandgreed/graphdata"
+        headers = {"User-Agent": "Mozilla/5.0"}
+        resp = requests.get(url, headers=headers, timeout=8)
+        data = resp.json()
+        fg = data.get("fear_and_greed", {})
+        score = fg.get("score", "N/A")
+        rating = fg.get("rating", "N/A")
+        prev = fg.get("previous_close", "N/A")
+        week = fg.get("previous_1_week", "N/A")
+        return (
+            f"[CNN 공포/탐욕 지수]\n"
+            f"현재: {score:.1f} ({rating})\n"
+            f"전일: {prev}\n"
+            f"1주전: {week}"
+        )
+    except Exception as e:
+        return f"공포/탐욕 지수 오류: {e}"
+
+
+def get_macro_data() -> str:
+    """Fetch key macro indicators: US10Y, DXY, VIX, Gold, Oil."""
+    tickers = {
+        "미국10년물금리": "^TNX",
+        "달러인덱스(DXY)": "DX-Y.NYB",
+        "VIX(공포지수)": "^VIX",
+        "금(Gold)": "GC=F",
+        "WTI원유": "CL=F",
+        "S&P500": "^GSPC",
+        "나스닥": "^IXIC",
+    }
+    lines = ["[주요 매크로 지표]"]
+    for name, sym in tickers.items():
+        try:
+            hist = yf.Ticker(sym).history(period="2d")
+            if len(hist) >= 2:
+                curr = hist["Close"].iloc[-1]
+                prev = hist["Close"].iloc[-2]
+                pct = (curr - prev) / prev * 100
+                lines.append(f"{name}: {curr:.2f} ({pct:+.2f}%)")
+            elif len(hist) == 1:
+                lines.append(f"{name}: {hist['Close'].iloc[-1]:.2f}")
+        except Exception:
+            pass
+    return "\n".join(lines)
+
+
+# ──────────────────────────────────────────────
 # Claude tool definitions
+# ──────────────────────────────────────────────
+
 TOOLS = [
     {
         "name": "web_search",
-        "description": "실시간 웹 검색. 최신 주가, 경제 지표, 기업 정보, 시황 등을 검색할 때 사용.",
+        "description": (
+            "실시간 웹 검색. 기업 정보, 시황, 경제 지표 등을 찾을 때 사용. "
+            "Tavily(설정 시) > DuckDuckGo 순으로 자동 사용."
+        ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "query": {"type": "string", "description": "검색어 (영어 또는 한국어)"},
-                "max_results": {"type": "integer", "description": "결과 수 (기본 5)", "default": 5},
+                "query": {"type": "string", "description": "검색어 (구체적일수록 정확). 영어 권장."},
+                "max_results": {"type": "integer", "default": 5},
             },
             "required": ["query"],
         },
     },
     {
         "name": "news_search",
-        "description": "최신 뉴스 검색. 종목 관련 뉴스, 경제 뉴스, 시장 이슈 등을 찾을 때 사용.",
+        "description": "최신 뉴스 검색. 종목 뉴스, 정책 뉴스, 시장 이슈 등. 영어로 검색하면 더 많은 결과.",
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {"type": "string", "description": "뉴스 검색어"},
-                "max_results": {"type": "integer", "description": "결과 수 (기본 5)", "default": 5},
+                "max_results": {"type": "integer", "default": 5},
             },
             "required": ["query"],
+        },
+    },
+    {
+        "name": "fetch_url",
+        "description": "특정 URL의 본문 내용을 읽어옴. 뉴스 기사 전문, 공식 발표문 등 확인할 때 사용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "url": {"type": "string", "description": "읽을 URL"},
+            },
+            "required": ["url"],
+        },
+    },
+    {
+        "name": "get_stock_info",
+        "description": "종목 펀더멘털 조회: PER, EPS, 52주 고/저, 애널리스트 목표가·의견, 배당 등.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커 (예: AAPL, MSFT)"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_earnings_calendar",
+        "description": "종목의 실적 발표 일정 및 최근 어닝 서프라이즈 확인.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker": {"type": "string", "description": "미국 주식 티커"},
+            },
+            "required": ["ticker"],
+        },
+    },
+    {
+        "name": "get_fear_greed",
+        "description": "CNN 공포/탐욕 지수 조회. 시장 심리 파악에 사용.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
+        },
+    },
+    {
+        "name": "get_macro_data",
+        "description": "미국 10년물 금리, DXY, VIX, 금, 원유, S&P500, 나스닥 등 주요 매크로 지표 조회.",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": [],
         },
     },
 ]
@@ -213,6 +451,16 @@ def run_tool(tool_name: str, tool_input: dict) -> str:
         return web_search(tool_input["query"], tool_input.get("max_results", 5))
     elif tool_name == "news_search":
         return news_search(tool_input["query"], tool_input.get("max_results", 5))
+    elif tool_name == "fetch_url":
+        return fetch_url(tool_input["url"])
+    elif tool_name == "get_stock_info":
+        return get_stock_info(tool_input["ticker"])
+    elif tool_name == "get_earnings_calendar":
+        return get_earnings_calendar(tool_input["ticker"])
+    elif tool_name == "get_fear_greed":
+        return get_fear_greed()
+    elif tool_name == "get_macro_data":
+        return get_macro_data()
     return "알 수 없는 도구입니다."
 
 
@@ -227,12 +475,19 @@ def ask_claude(question, config):
 항상 한국어로 답하고, 간결하게 핵심만 말해줘. 텔레그램 메시지이므로 너무 길지 않게.
 이전 대화 내용을 기억하고 맥락을 이어서 답해줘.
 
-최신 정보가 필요하면 반드시 web_search 또는 news_search 도구를 사용해서 실시간으로 찾아와.
-특히 다음 경우엔 검색해:
-- 최근 뉴스나 이슈 질문
-- 현재 시황이나 전망
-- 특정 종목의 최근 동향
-- 경제 지표나 금리 관련 질문
+## 도구 사용 지침
+정확한 답변을 위해 도구를 적극적으로 사용해:
+
+- **최신 뉴스/이슈** → news_search (영어로 검색하면 더 풍부한 결과)
+- **기업·시황 정보** → web_search
+- **기사 전문 확인** → fetch_url (검색에서 찾은 URL을 직접 읽기)
+- **PER·EPS·목표가** → get_stock_info
+- **실적 발표 일정** → get_earnings_calendar
+- **시장 심리 파악** → get_fear_greed
+- **금리·VIX·달러·금·원유** → get_macro_data
+
+여러 도구를 순서대로 조합해서 깊이 있는 답변을 줘.
+예) 뉴스 검색 → URL 읽기 → 펀더멘털 확인 → 종합 의견
 
 투자 조언 시 "개인적인 의견이며 투자 판단은 본인 책임"이라는 점을 명시해.
 
