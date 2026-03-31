@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.stockalert.bot</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/joon/miniforge3/bin/python3</string>
+        <string>/Users/joon/stock_alert_bot/bot.py</string>
+    </array>
+    <key>KeepAlive</key>
+    <true/>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>StandardOutPath</key>
+    <string>/Users/joon/stock_alert_bot/bot_out.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/joon/stock_alert_bot/bot_error.log</string>
+</dict>
+</plist>

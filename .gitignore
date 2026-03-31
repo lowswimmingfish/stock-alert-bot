@@ -1,0 +1,13 @@
+# 민감 정보 - 절대 커밋하지 말 것
+config.json
+seen_news.json
+chat_history.json
+
+# 로그
+*.log
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+.DS_Store

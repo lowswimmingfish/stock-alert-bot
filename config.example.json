@@ -1,0 +1,26 @@
+{
+  "anthropic_api_key": "sk-ant-api03-YOUR_KEY_HERE",
+  "telegram": {
+    "bot_token": "YOUR_TELEGRAM_BOT_TOKEN",
+    "chat_id": "YOUR_CHAT_ID"
+  },
+  "portfolio": {
+    "us_stocks": [
+      {
+        "ticker": "AAPL",
+        "shares": 10,
+        "avg_price": 150.0,
+        "currency": "USD"
+      }
+    ],
+    "kr_stocks": [
+      {
+        "ticker": "005930",
+        "name": "삼성전자",
+        "shares": 10,
+        "avg_price": 70000,
+        "currency": "KRW"
+      }
+    ]
+  }
+}
