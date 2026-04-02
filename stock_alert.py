@@ -3,6 +3,7 @@
 
 import json
 import requests
+import anthropic
 import yfinance as yf
 from pykrx import stock as pykrx_stock
 from datetime import datetime, timedelta
@@ -93,6 +94,10 @@ def get_market_indices():
         "DOW": "^DJI",
         "KOSPI": "^KS11",
         "KOSDAQ": "^KQ11",
+        "VIX": "^VIX",
+        "미국10년물": "^TNX",
+        "금(Gold)": "GC=F",
+        "WTI원유": "CL=F",
     }
     results = {}
     for name, ticker in indices.items():
@@ -110,6 +115,31 @@ def get_market_indices():
         except Exception:
             pass
     return results
+
+
+def get_market_summary_ai(indices, fx, config):
+    """Use Claude to write a brief market commentary."""
+    try:
+        client = anthropic.Anthropic(api_key=config["anthropic_api_key"])
+        idx_text = "\n".join([
+            f"{name}: {d['price']} ({d['change_pct']:+.2f}%)"
+            for name, d in indices.items()
+        ])
+        prompt = f"""아래 시장 데이터를 바탕으로 오늘 시황을 3-4줄로 핵심만 요약해줘.
+한국어로, 텔레그램 메시지에 맞게 짧고 명확하게. 불릿포인트 사용.
+
+{idx_text}
+USD/KRW: {fx['rate']} ({fx['change_pct']:+.2f}%)
+날짜: {datetime.now().strftime('%Y-%m-%d')}"""
+
+        resp = client.messages.create(
+            model="claude-haiku-4-5-20251001",
+            max_tokens=300,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        return resp.content[0].text.strip()
+    except Exception:
+        return ""
 
 
 def get_exchange_rate():
@@ -155,21 +185,53 @@ def build_message(config):
     indices = get_market_indices()
     fx = get_exchange_rate()
 
+    # AI 시황 요약
+    market_summary = get_market_summary_ai(indices, fx, config)
+
     # Build message
     lines = []
-    lines.append(f"<b>Daily Stock Report</b>")
+    lines.append(f"<b>📊 Daily Stock Report</b>")
     lines.append(f"{now.strftime('%Y-%m-%d %H:%M')}")
     lines.append("")
 
+    # AI 시황 코멘트
+    if market_summary:
+        lines.append("<b>오늘의 시황</b>")
+        lines.append(market_summary)
+        lines.append("")
+
     # Exchange rate
-    lines.append(f"<b>USD/KRW:</b> {format_number(fx['rate'])}원 ({format_change(fx['change_pct'])})")
+    fx_emoji = "📈" if fx['change_pct'] > 0 else "📉"
+    lines.append(f"<b>USD/KRW:</b> {format_number(fx['rate'])}원 {fx_emoji} ({format_change(fx['change_pct'])})")
     lines.append("")
 
-    # Market indices
-    lines.append("<b>Market Overview</b>")
-    for name, data in indices.items():
-        emoji = "🔴" if data["change_pct"] < 0 else "🟢"
-        lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
+    # Market indices - 한국장 / 미국장 / 매크로 구분
+    kr_indices = ["KOSPI", "KOSDAQ"]
+    us_indices = ["S&P 500", "NASDAQ", "DOW"]
+    macro_indices = ["VIX", "미국10년물", "금(Gold)", "WTI원유"]
+
+    lines.append("<b>🇰🇷 한국 시장</b>")
+    for name in kr_indices:
+        if name in indices:
+            data = indices[name]
+            emoji = "🔴" if data["change_pct"] < 0 else "🟢"
+            lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
+    lines.append("")
+
+    lines.append("<b>🇺🇸 미국 시장</b>")
+    for name in us_indices:
+        if name in indices:
+            data = indices[name]
+            emoji = "🔴" if data["change_pct"] < 0 else "🟢"
+            lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
+    lines.append("")
+
+    lines.append("<b>📉 매크로</b>")
+    for name in macro_indices:
+        if name in indices:
+            data = indices[name]
+            emoji = "🔴" if data["change_pct"] < 0 else "🟢"
+            lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
     lines.append("")
 
     # US Portfolio
