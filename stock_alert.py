@@ -8,18 +8,7 @@ import yfinance as yf
 from pykrx import stock as pykrx_stock
 from datetime import datetime, timedelta
 from pathlib import Path
-
-CONFIG_PATH = Path(__file__).parent / "config.json"
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
-
-
-def save_config(config):
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
+from config_loader import load_config
 
 
 def send_telegram(bot_token, chat_id, message):

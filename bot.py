@@ -13,11 +13,11 @@ from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
+from config_loader import load_config, save_config, DATA_DIR
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
 LOG_PATH = Path(__file__).parent / "bot.log"
-HISTORY_PATH = Path(__file__).parent / "chat_history.json"
-PRICE_CACHE_PATH = Path(__file__).parent / "price_cache.json"
+HISTORY_PATH = DATA_DIR / "chat_history.json"
+PRICE_CACHE_PATH = DATA_DIR / "price_cache.json"
 
 MAX_HISTORY = 20       # 최대 저장 메시지 수
 PRICE_CACHE_TTL = 300  # 시세 캐시 유효시간 (초, 5분)
@@ -27,16 +27,6 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(message)s",
 )
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
-
-
-def save_config(config):
-    with open(CONFIG_PATH, "w") as f:
-        json.dump(config, f, indent=2, ensure_ascii=False)
 
 
 def send_message(bot_token, chat_id, text):

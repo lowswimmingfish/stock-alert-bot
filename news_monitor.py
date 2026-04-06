@@ -11,9 +11,9 @@ from tavily import TavilyClient
 from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from config_loader import load_config, DATA_DIR
 
-CONFIG_PATH = Path(__file__).parent / "config.json"
-SEEN_PATH = Path(__file__).parent / "seen_news.json"
+SEEN_PATH = DATA_DIR / "seen_news.json"
 LOG_PATH = Path(__file__).parent / "news_monitor.log"
 
 logging.basicConfig(
@@ -32,11 +32,6 @@ MARKET_TOPICS = [
     {"name": "에너지", "query": "oil gas energy price OPEC supply"},
     {"name": "반도체", "query": "semiconductor chip shortage supply demand AI"},
 ]
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
 
 
 def load_seen():

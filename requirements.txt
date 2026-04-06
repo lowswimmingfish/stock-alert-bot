@@ -1,0 +1,9 @@
+anthropic
+yfinance
+pykrx
+requests
+tavily-python
+beautifulsoup4
+ddgs
+apscheduler
+pytz

@@ -2,6 +2,7 @@
 config.json
 seen_news.json
 chat_history.json
+price_cache.json
 
 # 로그
 *.log

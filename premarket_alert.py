@@ -7,13 +7,7 @@ import anthropic
 import yfinance as yf
 from pathlib import Path
 from datetime import datetime, timedelta
-
-CONFIG_PATH = Path(__file__).parent / "config.json"
-
-
-def load_config():
-    with open(CONFIG_PATH) as f:
-        return json.load(f)
+from config_loader import load_config
 
 
 def send_telegram(bot_token, chat_id, text):
