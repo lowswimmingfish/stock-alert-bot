@@ -8,6 +8,7 @@ import yfinance as yf
 from pathlib import Path
 from datetime import datetime, timedelta
 from config_loader import load_config
+import kis_api
 
 
 def send_telegram(bot_token, chat_id, text):
@@ -104,8 +105,16 @@ def build_premarket_briefing(config):
     """Build pre-market briefing using Claude with real-time data."""
     client = anthropic.Anthropic(api_key=config["anthropic_api_key"])
 
-    portfolio = config["portfolio"]
-    us_tickers = [s["ticker"] for s in portfolio["us_stocks"]]
+    # KIS 실계좌에서 미국 보유 종목 가져오기
+    us_holdings = []
+    us_tickers = []
+    if kis_api.is_configured():
+        raw = kis_api.get_us_balance_raw()
+        us_holdings = raw.get("holdings", [])
+        us_tickers = [h["ticker"] for h in us_holdings]
+    else:
+        # fallback: config 수동 데이터
+        us_tickers = [s["ticker"] for s in config["portfolio"].get("us_stocks", [])]
 
     # Gather data
     futures = get_futures()
@@ -119,10 +128,15 @@ def build_premarket_briefing(config):
         for name, d in futures.items()
     ])
 
-    holdings_text = "\n".join([
-        f"- {s['ticker']}: {s['shares']}주, 평단 ${s['avg_price']}, 직전 종가 ${us_data.get(s['ticker'], {}).get('last_close', 'N/A')}"
-        for s in portfolio["us_stocks"]
-    ])
+    if us_holdings:
+        holdings_text = "\n".join([
+            f"- {h['ticker']}: {h['qty']}주, 평단 ${h['avg_price']:.2f}, "
+            f"현재가 ${h['curr_price']:.2f}, 손익 ${h['profit']:+.2f} ({h['profit_pct']:+.1f}%), "
+            f"직전종가 ${us_data.get(h['ticker'], {}).get('last_close', 'N/A')}"
+            for h in us_holdings
+        ])
+    else:
+        holdings_text = "보유 종목 없음"
 
     news_text = "\n".join(news_headlines[:15]) if news_headlines else "최신 뉴스 없음"
 
@@ -178,6 +192,17 @@ def main():
         return
 
     config = load_config()
+
+    # 1. 일일 포트폴리오 리포트 먼저 전송
+    try:
+        from stock_alert import build_message
+        report_msg = build_message(config)
+        send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], report_msg)
+        print(f"Pre-market report sent at {datetime.now()}")
+    except Exception as e:
+        print(f"Report error: {e}")
+
+    # 2. 미장 개장 전 브리핑 전송
     msg = build_premarket_briefing(config)
     send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], msg)
     print(f"Pre-market briefing sent at {datetime.now()}")
