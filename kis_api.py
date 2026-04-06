@@ -53,14 +53,15 @@ def get_token() -> str:
         return cached
 
     app_key, app_secret, _, _ = _get_credentials()
+    body = json.dumps({
+        "grant_type": "client_credentials",
+        "appkey": app_key,
+        "appsecret": app_secret,
+    })
     resp = requests.post(
         f"{BASE_URL}/oauth2/tokenP",
-        headers={"content-type": "application/json"},
-        json={
-            "grant_type": "client_credentials",
-            "appkey": app_key,
-            "appsecret": app_secret,
-        },
+        headers={"content-type": "application/json; charset=utf-8"},
+        data=body,
         timeout=10,
     )
     resp.raise_for_status()
