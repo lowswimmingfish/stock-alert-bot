@@ -198,13 +198,29 @@ def run():
     tavily_key = config.get("tavily_api_key", "")
     alerts_sent = 0
 
-    # 1. 보유 종목 뉴스
-    stocks = (
-        [{"ticker": s["ticker"], "name": s["ticker"], "is_kr": False}
-         for s in config["portfolio"]["us_stocks"]] +
-        [{"ticker": s["ticker"], "name": s.get("name", s["ticker"]), "is_kr": True}
-         for s in config["portfolio"]["kr_stocks"]]
-    )
+    # 1. 보유 종목 뉴스 - KIS 실계좌 우선
+    stocks = []
+    try:
+        import kis_api
+        if kis_api.is_configured():
+            us_raw = kis_api.get_us_balance_raw()
+            kr_raw = kis_api.get_kr_balance_raw()
+            stocks = (
+                [{"ticker": h["ticker"], "name": h["ticker"], "is_kr": False}
+                 for h in us_raw.get("holdings", [])] +
+                [{"ticker": h["ticker"], "name": h["name"], "is_kr": True}
+                 for h in kr_raw.get("holdings", [])]
+            )
+    except Exception as e:
+        logging.warning(f"KIS 잔고 조회 실패, config fallback: {e}")
+
+    if not stocks:
+        stocks = (
+            [{"ticker": s["ticker"], "name": s["ticker"], "is_kr": False}
+             for s in config["portfolio"].get("us_stocks", [])] +
+            [{"ticker": s["ticker"], "name": s.get("name", s["ticker"]), "is_kr": True}
+             for s in config["portfolio"].get("kr_stocks", [])]
+        )
 
     def check_stock(stock):
         ticker, name, is_kr = stock["ticker"], stock["name"], stock["is_kr"]

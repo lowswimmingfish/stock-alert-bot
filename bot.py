@@ -134,8 +134,22 @@ def get_live_prices(config):
         return cached
 
     lines = ["\n현재 시세:"]
-    us_stocks = config["portfolio"]["us_stocks"]
-    kr_stocks = config["portfolio"]["kr_stocks"]
+
+    # KIS 실계좌에서 종목 가져오기
+    us_stocks = []
+    kr_stocks = []
+    try:
+        if kis_api.is_configured():
+            us_raw = kis_api.get_us_balance_raw()
+            kr_raw = kis_api.get_kr_balance_raw()
+            us_stocks = [{"ticker": h["ticker"]} for h in us_raw.get("holdings", [])]
+            kr_stocks = [{"ticker": h["ticker"], "name": h["name"]} for h in kr_raw.get("holdings", [])]
+    except Exception:
+        pass
+
+    if not us_stocks and not kr_stocks:
+        us_stocks = config["portfolio"].get("us_stocks", [])
+        kr_stocks = config["portfolio"].get("kr_stocks", [])
 
     # 병렬 조회
     with ThreadPoolExecutor(max_workers=8) as ex:
@@ -916,10 +930,10 @@ def handle_balance():
 def handle_buy(args, config):
     if len(args) < 3:
         return (
-            "사용법: /buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명] [실주문]\n"
+            "사용법: /buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명]\n"
             "예: /buy AAPL 10 150.5\n"
-            "예: /buy 424980 44 14340 마이크로투나노\n"
-            "실제 주문: /buy AAPL 10 150.5 실주문"
+            "예: /buy 424980 44 14340 마이크로투나노\n\n"
+            "⚠️ KIS 실계좌로 즉시 매수 주문됩니다."
         )
 
     ticker = args[0].upper()
@@ -929,97 +943,25 @@ def handle_buy(args, config):
     except ValueError:
         return "수량과 가격은 숫자로 입력해주세요."
 
-    # "실주문" 키워드가 있으면 KIS API로 실제 주문
-    real_order = "실주문" in args
-
-    kr_name = None
-    for a in args[3:]:
-        if a != "실주문":
-            kr_name = a
-            break
-
+    kr_name = args[3] if len(args) > 3 else None
     is_kr = ticker.isdigit() or kr_name is not None
 
-    # KIS 실제 주문 실행
-    if real_order and kis_api.is_configured():
-        if is_kr:
-            result = kis_api.place_kr_order(ticker, "buy", int(shares), int(price))
-        else:
-            result = kis_api.place_us_order(ticker, "buy", int(shares), price)
-        # 포트폴리오에도 기록
-        portfolio_result = _update_portfolio_buy(ticker, shares, price, kr_name, is_kr, config)
-        save_config(config)
-        return f"{result}\n\n{portfolio_result}"
+    if not kis_api.is_configured():
+        return "❌ KIS API가 설정되지 않았습니다."
 
     if is_kr:
-        stock_list = config["portfolio"]["kr_stocks"]
-        existing = next((s for s in stock_list if s["ticker"] == ticker), None)
-        if existing:
-            total_cost = existing["avg_price"] * existing["shares"] + price * shares
-            total_shares = existing["shares"] + shares
-            existing["avg_price"] = round(total_cost / total_shares)
-            existing["shares"] = total_shares
-            if kr_name:
-                existing["name"] = kr_name
-        else:
-            stock_list.append({
-                "ticker": ticker, "name": kr_name or ticker,
-                "shares": shares, "avg_price": price, "currency": "KRW",
-            })
-        display_name = kr_name or ticker
-        return f"<b>매수 기록 완료</b>\n{display_name} {shares}주 @ {price:,.0f}원"
+        return kis_api.place_kr_order(ticker, "buy", int(shares), int(price))
     else:
-        stock_list = config["portfolio"]["us_stocks"]
-        existing = next((s for s in stock_list if s["ticker"] == ticker), None)
-        if existing:
-            total_cost = existing["avg_price"] * existing["shares"] + price * shares
-            total_shares = existing["shares"] + shares
-            existing["avg_price"] = round(total_cost / total_shares, 2)
-            existing["shares"] = total_shares
-        else:
-            stock_list.append({
-                "ticker": ticker, "shares": shares,
-                "avg_price": price, "currency": "USD",
-            })
-        return f"<b>매수 기록 완료</b>\n{ticker} {shares}주 @ ${price:,.2f}"
-
-
-def _update_portfolio_buy(ticker, shares, price, kr_name, is_kr, config):
-    """포트폴리오에 매수 기록 (KIS 주문 후 호출)."""
-    if is_kr:
-        stock_list = config["portfolio"]["kr_stocks"]
-        existing = next((s for s in stock_list if s["ticker"] == ticker), None)
-        if existing:
-            total_cost = existing["avg_price"] * existing["shares"] + price * shares
-            total_shares = existing["shares"] + shares
-            existing["avg_price"] = round(total_cost / total_shares)
-            existing["shares"] = total_shares
-            if kr_name:
-                existing["name"] = kr_name
-        else:
-            stock_list.append({"ticker": ticker, "name": kr_name or ticker,
-                                "shares": shares, "avg_price": price, "currency": "KRW"})
-        return f"포트폴리오 기록 완료: {kr_name or ticker} {shares}주 @ {price:,.0f}원"
-    else:
-        stock_list = config["portfolio"]["us_stocks"]
-        existing = next((s for s in stock_list if s["ticker"] == ticker), None)
-        if existing:
-            total_cost = existing["avg_price"] * existing["shares"] + price * shares
-            total_shares = existing["shares"] + shares
-            existing["avg_price"] = round(total_cost / total_shares, 2)
-            existing["shares"] = total_shares
-        else:
-            stock_list.append({"ticker": ticker, "shares": shares,
-                                "avg_price": price, "currency": "USD"})
-        return f"포트폴리오 기록 완료: {ticker} {shares}주 @ ${price:.2f}"
+        return kis_api.place_us_order(ticker, "buy", int(shares), price)
 
 
 def handle_sell(args, config):
     if len(args) < 2:
         return (
-            "사용법: /sell &lt;종목&gt; &lt;수량&gt; [매도가] [실주문]\n"
-            "예: /sell AAPL 5\n"
-            "실제 주문: /sell AAPL 5 150.0 실주문"
+            "사용법: /sell &lt;종목&gt; &lt;수량&gt; [매도가]\n"
+            "예: /sell AAPL 5 150.0\n"
+            "예: /sell 424980 10\n\n"
+            "⚠️ KIS 실계좌로 즉시 매도 주문됩니다."
         )
 
     ticker = args[0].upper()
@@ -1035,39 +977,15 @@ def handle_sell(args, config):
         except ValueError:
             pass
 
-    real_order = "실주문" in args
     is_kr = ticker.isdigit()
 
-    # KIS 실제 주문
-    if real_order and kis_api.is_configured():
-        if is_kr:
-            kis_result = kis_api.place_kr_order(ticker, "sell", int(shares), int(price))
-        else:
-            kis_result = kis_api.place_us_order(ticker, "sell", int(shares), price)
-        # 포트폴리오에서도 제거
-        portfolio_result = _update_portfolio_sell(ticker, shares, is_kr, config)
-        save_config(config)
-        return f"{kis_result}\n\n{portfolio_result}"
+    if not kis_api.is_configured():
+        return "❌ KIS API가 설정되지 않았습니다."
 
-    return _update_portfolio_sell(ticker, shares, is_kr, config)
-
-
-def _update_portfolio_sell(ticker, shares, is_kr, config):
-    """포트폴리오에서 매도 기록."""
-    stock_list = config["portfolio"]["kr_stocks" if is_kr else "us_stocks"]
-    existing = next((s for s in stock_list if s["ticker"] == ticker), None)
-
-    if not existing:
-        return f"{ticker} 종목을 보유하고 있지 않습니다."
-
-    if shares >= existing["shares"]:
-        stock_list.remove(existing)
-        display = existing.get("name", ticker)
-        return f"<b>전량 매도 완료</b>\n{display} {existing['shares']}주 전량 매도"
+    if is_kr:
+        return kis_api.place_kr_order(ticker, "sell", int(shares), int(price))
     else:
-        existing["shares"] = round(existing["shares"] - shares, 6)
-        display = existing.get("name", ticker)
-        return f"<b>매도 기록 완료</b>\n{display} {shares}주 매도 (잔여: {existing['shares']}주)"
+        return kis_api.place_us_order(ticker, "sell", int(shares), price)
 
 
 def handle_portfolio(config):
@@ -1101,14 +1019,12 @@ def handle_reset():
 def handle_help():
     return (
         "<b>사용 가능한 명령어</b>\n\n"
-        "/buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명] [실주문]\n"
-        "  예: /buy AAPL 10 150.5\n"
-        "  예: /buy 424980 44 14340 마이크로투나노\n"
-        "  실제주문: /buy AAPL 10 150.5 실주문\n\n"
-        "/sell &lt;종목&gt; &lt;수량&gt; [매도가] [실주문]\n"
-        "  예: /sell AAPL 5\n"
-        "  실제주문: /sell AAPL 5 150.0 실주문\n\n"
-        "/portfolio - 한투 실제 계좌 잔고 조회\n"
+        "/buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명]\n"
+        "  예: /buy AAPL 10 150.5 → KIS 실매수\n"
+        "  예: /buy 424980 10 15000 마이크로투나노\n\n"
+        "/sell &lt;종목&gt; &lt;수량&gt; [매도가]\n"
+        "  예: /sell AAPL 5 150.0 → KIS 실매도\n\n"
+        "/portfolio - 한투 실계좌 잔고 조회\n"
         "/report - 즉시 리포트 받기\n"
         "/reset - 대화 기록 초기화\n"
         "/help - 도움말\n\n"
@@ -1134,10 +1050,8 @@ def process_update(update, config):
 
         if command == "/buy":
             response = handle_buy(args, config)
-            save_config(config)
         elif command == "/sell":
             response = handle_sell(args, config)
-            save_config(config)
         elif command in ("/portfolio", "/balance"):
             response = handle_portfolio(config)
         elif command == "/report":
