@@ -323,11 +323,18 @@ def get_kr_balance_raw() -> dict:
 
         total = {}
         if output2:
+            eval_amt  = safe_int(output2[0].get("scts_evlu_amt", 0))
+            profit    = safe_int(output2[0].get("evlu_pfls_smtl_amt", 0))
+            invested  = safe_int(output2[0].get("pchs_amt_smtl_amt", 0))
+            # evlu_erng_rt가 0이면 직접 계산
+            pct = safe_float(output2[0].get("evlu_erng_rt", 0))
+            if pct == 0 and invested:
+                pct = round(profit / invested * 100, 2)
             total = {
-                "eval_amt": safe_int(output2[0].get("scts_evlu_amt", 0)),
-                "profit": safe_int(output2[0].get("evlu_pfls_smtl_amt", 0)),
-                "profit_pct": safe_float(output2[0].get("evlu_erng_rt", 0)),
-                "invested": safe_int(output2[0].get("pchs_amt_smtl_amt", 0)),
+                "eval_amt":   eval_amt,
+                "profit":     profit,
+                "profit_pct": pct,
+                "invested":   invested,
             }
         return {"holdings": holdings, "total": total}
     except Exception as e:

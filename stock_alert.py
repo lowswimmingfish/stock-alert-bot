@@ -237,7 +237,10 @@ def build_message(config):
         if us_data["total"]:
             t = us_data["total"]
             pe = "📈" if t.get("profit", 0) >= 0 else "📉"
-            lines.append(f"  {pe} US합계: ${t.get('eval_amt', 0):,.2f} | 손익 ${t.get('profit', 0):+,.2f}")
+            invested_us = t.get("invested", 0)
+            profit_us = t.get("profit", 0)
+            pct_us = round(profit_us / invested_us * 100, 1) if invested_us else 0
+            lines.append(f"  {pe} US합계: ${t.get('eval_amt', 0):,.2f} | 손익 ${profit_us:+,.2f} ({pct_us:+.1f}%)")
         lines.append("")
 
         # 전체 합산 (원화 환산)
