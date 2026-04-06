@@ -175,6 +175,14 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
 
 
 def main():
+    # Mac 절전 후 뒤늦게 실행될 경우 무시 (21:00~22:30 범위 밖이면 스킵)
+    hour = datetime.now().hour
+    minute = datetime.now().minute
+    in_window = (hour == 21) or (hour == 22 and minute <= 30)
+    if not in_window:
+        print(f"Skipped: outside allowed window (current: {hour:02d}:{minute:02d})")
+        return
+
     config = load_config()
     msg = build_premarket_briefing(config)
     send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], msg)

@@ -10,7 +10,7 @@
         <string>/Users/joon/stock_alert_bot/news_monitor.py</string>
     </array>
     <key>StartInterval</key>
-    <integer>1800</integer>
+    <integer>600</integer>
     <key>RunAtLoad</key>
     <true/>
     <key>StandardOutPath</key>

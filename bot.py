@@ -3,20 +3,24 @@
 
 import json
 import logging
+import time
 import requests
 import anthropic
 import yfinance as yf
 from pykrx import stock as pykrx_stock
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 from bs4 import BeautifulSoup
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
 
 CONFIG_PATH = Path(__file__).parent / "config.json"
 LOG_PATH = Path(__file__).parent / "bot.log"
 HISTORY_PATH = Path(__file__).parent / "chat_history.json"
+PRICE_CACHE_PATH = Path(__file__).parent / "price_cache.json"
 
-MAX_HISTORY = 20  # 최대 저장 메시지 수 (user+assistant 합산)
+MAX_HISTORY = 20       # 최대 저장 메시지 수
+PRICE_CACHE_TTL = 300  # 시세 캐시 유효시간 (초, 5분)
 
 logging.basicConfig(
     filename=LOG_PATH,
@@ -75,83 +79,122 @@ def get_portfolio_context(config):
     return "\n".join(lines)
 
 
-def get_live_prices(config):
-    """Fetch live prices for all holdings."""
-    lines = ["\n현재 시세:"]
+def _load_price_cache():
+    if PRICE_CACHE_PATH.exists():
+        with open(PRICE_CACHE_PATH) as f:
+            data = json.load(f)
+        if time.time() - data.get("ts", 0) < PRICE_CACHE_TTL:
+            return data.get("prices", "")
+    return None
 
-    # US stocks
-    for s in config["portfolio"]["us_stocks"]:
-        try:
-            t = yf.Ticker(s["ticker"])
-            hist = t.history(period="2d")
-            if len(hist) >= 1:
-                price = hist["Close"].iloc[-1]
-                change = ""
-                if len(hist) >= 2:
-                    prev = hist["Close"].iloc[-2]
-                    pct = (price - prev) / prev * 100
-                    change = f" (전일비 {pct:+.2f}%)"
-                lines.append(f"- {s['ticker']}: ${price:.2f}{change}")
-        except Exception:
-            pass
 
-    # KR stocks
-    today = datetime.now()
-    for s in config["portfolio"]["kr_stocks"]:
-        try:
-            end = today.strftime("%Y%m%d")
-            start = (today - timedelta(days=10)).strftime("%Y%m%d")
-            df = pykrx_stock.get_market_ohlcv(start, end, s["ticker"])
-            if len(df) >= 1:
-                price = int(df["종가"].iloc[-1])
-                change = ""
-                if len(df) >= 2:
-                    prev = int(df["종가"].iloc[-2])
-                    pct = (price - prev) / prev * 100
-                    change = f" (전일비 {pct:+.2f}%)"
-                name = s.get("name", s["ticker"])
-                lines.append(f"- {name}: {price:,}원{change}")
-        except Exception:
-            pass
+def _save_price_cache(text):
+    with open(PRICE_CACHE_PATH, "w") as f:
+        json.dump({"ts": time.time(), "prices": text}, f)
 
-    # Exchange rate
+
+def _fetch_us_price(s):
     try:
-        t = yf.Ticker("USDKRW=X")
-        hist = t.history(period="1d")
+        hist = yf.Ticker(s["ticker"]).history(period="2d")
+        if len(hist) >= 2:
+            price, prev = hist["Close"].iloc[-1], hist["Close"].iloc[-2]
+            pct = (price - prev) / prev * 100
+            return f"- {s['ticker']}: ${price:.2f} ({pct:+.2f}%)"
+        elif len(hist) == 1:
+            return f"- {s['ticker']}: ${hist['Close'].iloc[-1]:.2f}"
+    except Exception:
+        pass
+    return None
+
+
+def _fetch_kr_price(s):
+    try:
+        today = datetime.now()
+        df = pykrx_stock.get_market_ohlcv(
+            (today - timedelta(days=10)).strftime("%Y%m%d"),
+            today.strftime("%Y%m%d"), s["ticker"]
+        )
+        if len(df) >= 2:
+            price, prev = int(df["종가"].iloc[-1]), int(df["종가"].iloc[-2])
+            pct = (price - prev) / prev * 100
+            return f"- {s.get('name', s['ticker'])}: {price:,}원 ({pct:+.2f}%)"
+        elif len(df) == 1:
+            return f"- {s.get('name', s['ticker'])}: {int(df['종가'].iloc[-1]):,}원"
+    except Exception:
+        pass
+    return None
+
+
+def get_live_prices(config):
+    """Fetch live prices in parallel with 5-min cache."""
+    cached = _load_price_cache()
+    if cached:
+        return cached
+
+    lines = ["\n현재 시세:"]
+    us_stocks = config["portfolio"]["us_stocks"]
+    kr_stocks = config["portfolio"]["kr_stocks"]
+
+    # 병렬 조회
+    with ThreadPoolExecutor(max_workers=8) as ex:
+        us_futures = {ex.submit(_fetch_us_price, s): s for s in us_stocks}
+        kr_futures = {ex.submit(_fetch_kr_price, s): s for s in kr_stocks}
+        extra_futures = {
+            ex.submit(lambda: yf.Ticker("USDKRW=X").history(period="1d")): "fx",
+        }
+        for fut in as_completed(us_futures):
+            r = fut.result()
+            if r:
+                lines.append(r)
+        for fut in as_completed(kr_futures):
+            r = fut.result()
+            if r:
+                lines.append(r)
+
+    # 환율
+    try:
+        hist = yf.Ticker("USDKRW=X").history(period="1d")
         if len(hist) >= 1:
-            rate = hist["Close"].iloc[-1]
-            lines.append(f"\n환율: 1 USD = {rate:,.2f} KRW")
+            lines.append(f"\n환율: 1 USD = {hist['Close'].iloc[-1]:,.2f} KRW")
     except Exception:
         pass
 
-    # Major indices
-    indices = {"S&P500": "^GSPC", "NASDAQ": "^IXIC", "KOSPI": "^KS11", "KOSDAQ": "^KQ11"}
+    # 주요 지수
+    index_map = {"S&P500": "^GSPC", "NASDAQ": "^IXIC", "KOSPI": "^KS11", "KOSDAQ": "^KQ11"}
     lines.append("\n주요 지수:")
-    for name, ticker in indices.items():
-        try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                curr = hist["Close"].iloc[-1]
-                prev = hist["Close"].iloc[-2]
-                pct = (curr - prev) / prev * 100
-                lines.append(f"- {name}: {curr:,.2f} ({pct:+.2f}%)")
-        except Exception:
-            pass
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        def fetch_idx(name_sym):
+            name, sym = name_sym
+            try:
+                hist = yf.Ticker(sym).history(period="2d")
+                if len(hist) >= 2:
+                    curr, prev = hist["Close"].iloc[-1], hist["Close"].iloc[-2]
+                    pct = (curr - prev) / prev * 100
+                    return f"- {name}: {curr:,.2f} ({pct:+.2f}%)"
+            except Exception:
+                pass
+            return None
+        for r in ex.map(fetch_idx, index_map.items()):
+            if r:
+                lines.append(r)
 
-    return "\n".join(lines)
+    result = "\n".join(lines)
+    _save_price_cache(result)
+    return result
 
 
 # ──────────────────────────────────────────────
 # Tool implementations
 # ──────────────────────────────────────────────
 
+def _tavily_key():
+    return load_config().get("tavily_api_key", "")
+
+
 def web_search(query: str, max_results: int = 5) -> str:
     """Search the web using DuckDuckGo."""
     try:
-        # Tavily가 설정돼 있으면 우선 사용
-        config = load_config()
-        tavily_key = config.get("tavily_api_key", "")
+        tavily_key = _tavily_key()
         if tavily_key:
             from tavily import TavilyClient
             client = TavilyClient(api_key=tavily_key)
@@ -183,8 +226,7 @@ def web_search(query: str, max_results: int = 5) -> str:
 def news_search(query: str, max_results: int = 5) -> str:
     """Search latest news. Tries Tavily first, falls back to DuckDuckGo."""
     try:
-        config = load_config()
-        tavily_key = config.get("tavily_api_key", "")
+        tavily_key = _tavily_key()
         if tavily_key:
             from tavily import TavilyClient
             client = TavilyClient(api_key=tavily_key)
@@ -787,16 +829,26 @@ def ask_claude(question, config):
     history = load_history()
     history.append({"role": "user", "content": question})
 
+    def call_claude(msgs, retries=3):
+        for attempt in range(retries):
+            try:
+                return client.messages.create(
+                    model="claude-sonnet-4-20250514",
+                    max_tokens=1024,
+                    system=system_prompt,
+                    tools=TOOLS,
+                    messages=msgs,
+                )
+            except anthropic.APIConnectionError:
+                if attempt < retries - 1:
+                    time.sleep(2 ** attempt)
+                else:
+                    raise
+
     # Agentic loop - Claude can call tools multiple times
     messages = history.copy()
     while True:
-        response = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1024,
-            system=system_prompt,
-            tools=TOOLS,
-            messages=messages,
-        )
+        response = call_claude(messages)
 
         # If Claude wants to use a tool
         if response.stop_reason == "tool_use":
