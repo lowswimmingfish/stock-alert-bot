@@ -12,6 +12,17 @@ _LOCAL_CONFIG = Path(__file__).parent / "config.json"
 _PORTFOLIO_FILE = DATA_DIR / "portfolio.json"
 
 
+DEFAULT_PORTFOLIO = {
+    "holdings": [
+        {"ticker": "CORN", "exchange": "US", "avg_price": 18.69, "shares": 22},
+        {"ticker": "NTR",  "exchange": "US", "avg_price": 78.65, "shares": 1},
+        {"ticker": "VOO",  "exchange": "US", "avg_price": 626.51, "shares": 0.270143},
+        {"ticker": "MSFT", "exchange": "US", "avg_price": 443.61, "shares": 2.964648},
+        {"ticker": "950160", "exchange": "KR", "name": "마이크로투나노", "avg_price": 14340, "shares": 44}
+    ]
+}
+
+
 def load_config() -> dict:
     config = {}
 
@@ -25,7 +36,19 @@ def load_config() -> dict:
         with open(_PORTFOLIO_FILE) as f:
             config["portfolio"] = json.load(f)
 
-    # 3. 환경변수로 시크릿 덮어쓰기 (Railway 환경변수 우선)
+    # 3. 환경변수 PORTFOLIO_JSON으로 포트폴리오 설정 가능
+    portfolio_json = os.environ.get("PORTFOLIO_JSON")
+    if portfolio_json:
+        try:
+            config["portfolio"] = json.loads(portfolio_json)
+        except json.JSONDecodeError:
+            pass
+
+    # 4. 포트폴리오가 없으면 기본값 사용
+    if "portfolio" not in config:
+        config["portfolio"] = DEFAULT_PORTFOLIO
+
+    # 5. 환경변수로 시크릿 덮어쓰기 (Railway 환경변수 우선)
     for key, env in [
         ("anthropic_api_key", "ANTHROPIC_API_KEY"),
         ("tavily_api_key",    "TAVILY_API_KEY"),
