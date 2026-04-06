@@ -908,8 +908,19 @@ def ask_claude(question, config):
 
 def handle_balance():
     """한투 실제 계좌 잔고 조회."""
+    import os
+    app_key = os.environ.get("KIS_APP_KEY", "")
+    app_secret = os.environ.get("KIS_APP_SECRET", "")
+    account_no = os.environ.get("KIS_ACCOUNT_NO", "")
+    # 디버그: 환경변수 로딩 확인
+    debug = (
+        f"[디버그]\n"
+        f"KIS_APP_KEY: {'✅ ' + app_key[:6] + '...' if app_key else '❌ 없음'}\n"
+        f"KIS_APP_SECRET: {'✅ ' + str(len(app_secret)) + '자리' if app_secret else '❌ 없음'}\n"
+        f"KIS_ACCOUNT_NO: {'✅ ' + account_no if account_no else '❌ 없음'}\n"
+    )
     if not kis_api.is_configured():
-        return "❌ 한국투자증권 API가 설정되지 않았습니다."
+        return "❌ 한국투자증권 API가 설정되지 않았습니다.\n\n" + debug
     return kis_api.get_full_balance()
 
 
