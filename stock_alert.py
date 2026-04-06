@@ -9,6 +9,7 @@ from pykrx import stock as pykrx_stock
 from datetime import datetime, timedelta
 from pathlib import Path
 from config_loader import load_config
+import kis_api
 
 
 def send_telegram(bot_token, chat_id, message):
@@ -162,39 +163,26 @@ def format_number(n):
 
 
 def build_message(config):
-    portfolio = config["portfolio"]
     now = datetime.now()
-
-    # Gather data
-    us_tickers = [s["ticker"] for s in portfolio["us_stocks"]]
-    kr_tickers = [s["ticker"] for s in portfolio["kr_stocks"]]
-
-    us_data = get_us_stock_data(us_tickers)
-    kr_data = get_kr_stock_data(kr_tickers)
     indices = get_market_indices()
     fx = get_exchange_rate()
-
-    # AI 시황 요약
     market_summary = get_market_summary_ai(indices, fx, config)
 
-    # Build message
     lines = []
-    lines.append(f"<b>📊 Daily Stock Report</b>")
-    lines.append(f"{now.strftime('%Y-%m-%d %H:%M')}")
+    lines.append("<b>📊 Daily Stock Report</b>")
+    lines.append(now.strftime('%Y-%m-%d %H:%M'))
     lines.append("")
 
-    # AI 시황 코멘트
     if market_summary:
         lines.append("<b>오늘의 시황</b>")
         lines.append(market_summary)
         lines.append("")
 
-    # Exchange rate
     fx_emoji = "📈" if fx['change_pct'] > 0 else "📉"
     lines.append(f"<b>USD/KRW:</b> {format_number(fx['rate'])}원 {fx_emoji} ({format_change(fx['change_pct'])})")
     lines.append("")
 
-    # Market indices - 한국장 / 미국장 / 매크로 구분
+    # 시장 지수
     kr_indices = ["KOSPI", "KOSDAQ"]
     us_indices = ["S&P 500", "NASDAQ", "DOW"]
     macro_indices = ["VIX", "미국10년물", "금(Gold)", "WTI원유"]
@@ -202,103 +190,72 @@ def build_message(config):
     lines.append("<b>🇰🇷 한국 시장</b>")
     for name in kr_indices:
         if name in indices:
-            data = indices[name]
-            emoji = "🔴" if data["change_pct"] < 0 else "🟢"
-            lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
+            d = indices[name]
+            e = "🔴" if d["change_pct"] < 0 else "🟢"
+            lines.append(f"  {e} {name}: {format_number(d['price'])} ({format_change(d['change_pct'])})")
     lines.append("")
 
     lines.append("<b>🇺🇸 미국 시장</b>")
     for name in us_indices:
         if name in indices:
-            data = indices[name]
-            emoji = "🔴" if data["change_pct"] < 0 else "🟢"
-            lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
+            d = indices[name]
+            e = "🔴" if d["change_pct"] < 0 else "🟢"
+            lines.append(f"  {e} {name}: {format_number(d['price'])} ({format_change(d['change_pct'])})")
     lines.append("")
 
     lines.append("<b>📉 매크로</b>")
     for name in macro_indices:
         if name in indices:
-            data = indices[name]
-            emoji = "🔴" if data["change_pct"] < 0 else "🟢"
-            lines.append(f"  {emoji} {name}: {format_number(data['price'])} ({format_change(data['change_pct'])})")
+            d = indices[name]
+            e = "🔴" if d["change_pct"] < 0 else "🟢"
+            lines.append(f"  {e} {name}: {format_number(d['price'])} ({format_change(d['change_pct'])})")
     lines.append("")
 
-    # US Portfolio
-    total_us_invested = 0
-    total_us_current = 0
-    lines.append("<b>US Stocks</b>")
-    for s in portfolio["us_stocks"]:
-        ticker = s["ticker"]
-        data = us_data.get(ticker, {})
-        price = data.get("price", 0)
-        change = data.get("change_pct", 0)
-        invested = s["avg_price"] * s["shares"]
-        current_val = price * s["shares"]
-        pnl = current_val - invested
-        pnl_pct = (pnl / invested * 100) if invested else 0
-        total_us_invested += invested
-        total_us_current += current_val
+    # ── KIS API 실계좌 포트폴리오 ──
+    if kis_api.is_configured():
+        kr_data = kis_api.get_kr_balance_raw()
+        us_data = kis_api.get_us_balance_raw()
 
-        emoji = "🔴" if change < 0 else "🟢"
-        pnl_emoji = "📉" if pnl < 0 else "📈"
-        lines.append(f"  {emoji} <b>{ticker}</b>: ${format_number(price)} ({format_change(change)})")
-        lines.append(f"     {s['shares']}주 | 평단 ${format_number(s['avg_price'])}")
-        lines.append(f"     {pnl_emoji} 손익: ${format_number(round(pnl, 2))} ({format_change(round(pnl_pct, 1))})")
-    lines.append("")
+        # 국내주식
+        lines.append("<b>🇰🇷 KR Stocks (실계좌)</b>")
+        for h in kr_data["holdings"]:
+            pe = "📈" if h["profit"] >= 0 else "📉"
+            lines.append(f"  {pe} <b>{h['name']}</b>: {h['curr_price']:,}원 | {h['qty']}주 | 평단 {h['avg_price']:,}원")
+            lines.append(f"       손익 {h['profit']:+,}원 ({h['profit_pct']:+.1f}%)")
+        if kr_data["total"]:
+            t = kr_data["total"]
+            pe = "📈" if t.get("profit", 0) >= 0 else "📉"
+            lines.append(f"  {pe} KR합계: {t.get('eval_amt', 0):,}원 | 손익 {t.get('profit', 0):+,}원 ({t.get('profit_pct', 0):+.1f}%)")
+        lines.append("")
 
-    us_total_pnl = total_us_current - total_us_invested
-    us_total_pnl_pct = (us_total_pnl / total_us_invested * 100) if total_us_invested else 0
-    lines.append(f"  <b>US 합계:</b> ${format_number(round(total_us_current, 2))}")
-    lines.append(f"  투자금: ${format_number(round(total_us_invested, 2))}")
-    pnl_emoji = "📉" if us_total_pnl < 0 else "📈"
-    lines.append(f"  {pnl_emoji} 총 손익: ${format_number(round(us_total_pnl, 2))} ({format_change(round(us_total_pnl_pct, 1))})")
-    lines.append("")
+        # 해외주식
+        lines.append("<b>🇺🇸 US Stocks (실계좌)</b>")
+        for h in us_data["holdings"]:
+            pe = "📈" if h["profit"] >= 0 else "📉"
+            lines.append(f"  {pe} <b>{h['ticker']}</b>: ${h['curr_price']:.2f} | {h['qty']}주 | 평단 ${h['avg_price']:.2f}")
+            lines.append(f"       손익 ${h['profit']:+.2f} ({h['profit_pct']:+.1f}%)")
+        if us_data["total"]:
+            t = us_data["total"]
+            pe = "📈" if t.get("profit", 0) >= 0 else "📉"
+            lines.append(f"  {pe} US합계: ${t.get('eval_amt', 0):,.2f} | 손익 ${t.get('profit', 0):+,.2f}")
+        lines.append("")
 
-    # KR Portfolio
-    total_kr_invested = 0
-    total_kr_current = 0
-    lines.append("<b>KR Stocks</b>")
-    for s in portfolio["kr_stocks"]:
-        ticker = s["ticker"]
-        name = s.get("name", ticker)
-        data = kr_data.get(ticker, {})
-        price = data.get("price", 0)
-        change = data.get("change_pct", 0)
-        invested = s["avg_price"] * s["shares"]
-        current_val = price * s["shares"]
-        pnl = current_val - invested
-        pnl_pct = (pnl / invested * 100) if invested else 0
-        total_kr_invested += invested
-        total_kr_current += current_val
+        # 전체 합산 (원화 환산)
+        kr_eval = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
+        kr_profit = kr_data["total"].get("profit", 0) if kr_data["total"] else 0
+        us_eval_usd = us_data["total"].get("eval_amt", 0) if us_data["total"] else 0
+        us_profit_usd = us_data["total"].get("profit", 0) if us_data["total"] else 0
+        rate = fx["rate"] or 1
+        total_krw = kr_eval + us_eval_usd * rate
+        total_profit_krw = kr_profit + us_profit_usd * rate
 
-        emoji = "🔴" if change < 0 else "🟢"
-        pnl_emoji = "📉" if pnl < 0 else "📈"
-        lines.append(f"  {emoji} <b>{name}</b>: {format_number(price)}원 ({format_change(change)})")
-        lines.append(f"     {s['shares']}주 | 평단 {format_number(s['avg_price'])}원")
-        lines.append(f"     {pnl_emoji} 손익: {format_number(round(pnl))}원 ({format_change(round(pnl_pct, 1))})")
-    lines.append("")
+        pe = "📈" if total_profit_krw >= 0 else "📉"
+        lines.append("<b>💰 Total (원화 환산)</b>")
+        lines.append(f"  총 평가금: {total_krw:,.0f}원")
+        lines.append(f"  {pe} 총 손익: {total_profit_krw:+,.0f}원")
 
-    kr_total_pnl = total_kr_current - total_kr_invested
-    kr_total_pnl_pct = (kr_total_pnl / total_kr_invested * 100) if total_kr_invested else 0
-    lines.append(f"  <b>KR 합계:</b> {format_number(round(total_kr_current))}원")
-    lines.append(f"  투자금: {format_number(round(total_kr_invested))}원")
-    pnl_emoji = "📉" if kr_total_pnl < 0 else "📈"
-    lines.append(f"  {pnl_emoji} 총 손익: {format_number(round(kr_total_pnl))}원 ({format_change(round(kr_total_pnl_pct, 1))})")
-    lines.append("")
-
-    # Total portfolio in KRW
-    us_in_krw = total_us_current * fx["rate"]
-    us_invested_krw = total_us_invested * fx["rate"]
-    total_krw = us_in_krw + total_kr_current
-    total_invested_krw = us_invested_krw + total_kr_invested
-    total_pnl_krw = total_krw - total_invested_krw
-    total_pnl_pct = (total_pnl_krw / total_invested_krw * 100) if total_invested_krw else 0
-
-    lines.append("<b>Total Portfolio (KRW)</b>")
-    lines.append(f"  총 평가금: {format_number(round(total_krw))}원")
-    lines.append(f"  총 투자금: {format_number(round(total_invested_krw))}원")
-    pnl_emoji = "📉" if total_pnl_krw < 0 else "📈"
-    lines.append(f"  {pnl_emoji} 총 손익: {format_number(round(total_pnl_krw))}원 ({format_change(round(total_pnl_pct, 1))})")
+    else:
+        lines.append("⚠️ KIS API 미연결 - 포트폴리오 데이터 없음")
 
     return "\n".join(lines)
 

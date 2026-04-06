@@ -276,6 +276,122 @@ def get_full_balance() -> str:
     return f"{kr}\n\n{us}"
 
 
+def get_kr_balance_raw() -> dict:
+    """국내주식 잔고 raw 데이터 반환 (report 용)."""
+    try:
+        app_key, app_secret, account_no, account_cd = _get_credentials()
+        resp = requests.get(
+            f"{BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
+            headers=_headers("TTTC8434R"),
+            params={
+                "CANO": account_no, "ACNT_PRDT_CD": account_cd,
+                "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02",
+                "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N",
+                "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01",
+                "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        output1 = data.get("output1", [])
+        output2 = data.get("output2", [{}])
+
+        def safe_int(v):
+            try: return int(float(str(v).replace(",", "") or 0))
+            except: return 0
+
+        def safe_float(v):
+            try: return float(str(v).replace(",", "") or 0)
+            except: return 0.0
+
+        holdings = []
+        for item in output1:
+            qty = safe_int(item.get("hldg_qty", 0))
+            if qty == 0:
+                continue
+            holdings.append({
+                "ticker": item.get("pdno", ""),
+                "name": item.get("prdt_name", ""),
+                "qty": qty,
+                "avg_price": safe_int(item.get("pchs_avg_pric", 0)),
+                "curr_price": safe_int(item.get("prpr", 0)),
+                "profit": safe_int(item.get("evlu_pfls_amt", 0)),
+                "profit_pct": safe_float(item.get("evlu_pfls_rt", 0)),
+                "eval_amt": safe_int(item.get("evlu_amt", 0)),
+                "invested": safe_int(item.get("pchs_amt", 0)),
+            })
+
+        total = {}
+        if output2:
+            total = {
+                "eval_amt": safe_int(output2[0].get("scts_evlu_amt", 0)),
+                "profit": safe_int(output2[0].get("evlu_pfls_smtl_amt", 0)),
+                "profit_pct": safe_float(output2[0].get("evlu_erng_rt", 0)),
+                "invested": safe_int(output2[0].get("pchs_amt_smtl_amt", 0)),
+            }
+        return {"holdings": holdings, "total": total}
+    except Exception as e:
+        logger.error(f"KIS 국내 raw 잔고 오류: {e}")
+        return {"holdings": [], "total": {}}
+
+
+def get_us_balance_raw() -> dict:
+    """해외주식 잔고 raw 데이터 반환 (report 용)."""
+    try:
+        app_key, app_secret, account_no, account_cd = _get_credentials()
+        resp = requests.get(
+            f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
+            headers=_headers("TTTS3012R"),
+            params={
+                "CANO": account_no, "ACNT_PRDT_CD": account_cd,
+                "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840",
+                "TR_MKET_CD": "00", "INQR_DVSN_CD": "00",
+                "CTX_AREA_FK200": "", "CTX_AREA_NK200": "",
+            },
+            timeout=10,
+        )
+        data = resp.json()
+        output1 = data.get("output1", [])
+        output2 = data.get("output2", [{}])
+
+        def safe_float(v):
+            try: return float(str(v).replace(",", "") or 0)
+            except: return 0.0
+
+        holdings = []
+        for item in output1:
+            qty = safe_float(item.get("cblc_qty13", 0))
+            if qty == 0:
+                continue
+            avg  = safe_float(item.get("pchs_avg_pric", 0))
+            curr = safe_float(item.get("now_pric2", 0))
+            profit = safe_float(item.get("frcr_evlu_pfls_amt", 0))
+            invested = avg * qty
+            pct = (profit / invested * 100) if invested else 0
+            holdings.append({
+                "ticker": item.get("pdno", ""),
+                "name": item.get("prdt_name", item.get("pdno", "")),
+                "qty": qty,
+                "avg_price": avg,
+                "curr_price": curr,
+                "profit": profit,
+                "profit_pct": round(pct, 2),
+                "eval_amt": curr * qty,
+                "invested": invested,
+            })
+
+        total = {}
+        if output2:
+            total = {
+                "eval_amt": safe_float(output2[0].get("tot_frcr_cblc_smtl", 0)),
+                "profit": safe_float(output2[0].get("ovrs_tot_pfls", 0)),
+            }
+        return {"holdings": holdings, "total": total}
+    except Exception as e:
+        logger.error(f"KIS 해외 raw 잔고 오류: {e}")
+        return {"holdings": [], "total": {}}
+
+
 # ── 주문 실행 ────────────────────────────────────────
 
 # 시장 코드 매핑 (해외)
