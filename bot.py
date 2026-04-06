@@ -14,6 +14,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 from datetime import datetime, timedelta
 from config_loader import load_config, save_config, DATA_DIR
+import kis_api
 
 LOG_PATH = Path(__file__).parent / "bot.log"
 HISTORY_PATH = DATA_DIR / "chat_history.json"
@@ -740,6 +741,21 @@ TOOLS = [
             "required": ["ticker"],
         },
     },
+    {
+        "name": "get_account_balance",
+        "description": "한국투자증권 계좌 실제 잔고 조회. 국내/해외 보유 종목, 평가금액, 손익 확인.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "market": {
+                    "type": "string",
+                    "enum": ["all", "kr", "us"],
+                    "description": "all=전체, kr=국내만, us=해외만",
+                },
+            },
+            "required": [],
+        },
+    },
 ]
 
 
@@ -773,6 +789,14 @@ def run_tool(tool_name: str, tool_input: dict) -> str:
         return get_dividend_history(tool_input["ticker"])
     elif tool_name == "get_ticker_news":
         return get_ticker_news(tool_input["ticker"])
+    elif tool_name == "get_account_balance":
+        market = tool_input.get("market", "all")
+        if market == "kr":
+            return kis_api.get_kr_balance()
+        elif market == "us":
+            return kis_api.get_us_balance()
+        else:
+            return kis_api.get_full_balance()
     return "알 수 없는 도구입니다."
 
 
@@ -871,9 +895,21 @@ def ask_claude(question, config):
             return answer
 
 
+def handle_balance():
+    """한투 실제 계좌 잔고 조회."""
+    if not kis_api.is_configured():
+        return "❌ 한국투자증권 API가 설정되지 않았습니다."
+    return kis_api.get_full_balance()
+
+
 def handle_buy(args, config):
     if len(args) < 3:
-        return "사용법: /buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명]\n예: /buy AAPL 10 150.5\n예: /buy 424980 44 14340 마이크로투나노"
+        return (
+            "사용법: /buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명] [실주문]\n"
+            "예: /buy AAPL 10 150.5\n"
+            "예: /buy 424980 44 14340 마이크로투나노\n"
+            "실제 주문: /buy AAPL 10 150.5 실주문"
+        )
 
     ticker = args[0].upper()
     try:
@@ -882,8 +918,27 @@ def handle_buy(args, config):
     except ValueError:
         return "수량과 가격은 숫자로 입력해주세요."
 
-    kr_name = args[3] if len(args) > 3 else None
+    # "실주문" 키워드가 있으면 KIS API로 실제 주문
+    real_order = "실주문" in args
+
+    kr_name = None
+    for a in args[3:]:
+        if a != "실주문":
+            kr_name = a
+            break
+
     is_kr = ticker.isdigit() or kr_name is not None
+
+    # KIS 실제 주문 실행
+    if real_order and kis_api.is_configured():
+        if is_kr:
+            result = kis_api.place_kr_order(ticker, "buy", int(shares), int(price))
+        else:
+            result = kis_api.place_us_order(ticker, "buy", int(shares), price)
+        # 포트폴리오에도 기록
+        portfolio_result = _update_portfolio_buy(ticker, shares, price, kr_name, is_kr, config)
+        save_config(config)
+        return f"{result}\n\n{portfolio_result}"
 
     if is_kr:
         stock_list = config["portfolio"]["kr_stocks"]
@@ -918,9 +973,43 @@ def handle_buy(args, config):
         return f"<b>매수 기록 완료</b>\n{ticker} {shares}주 @ ${price:,.2f}"
 
 
+def _update_portfolio_buy(ticker, shares, price, kr_name, is_kr, config):
+    """포트폴리오에 매수 기록 (KIS 주문 후 호출)."""
+    if is_kr:
+        stock_list = config["portfolio"]["kr_stocks"]
+        existing = next((s for s in stock_list if s["ticker"] == ticker), None)
+        if existing:
+            total_cost = existing["avg_price"] * existing["shares"] + price * shares
+            total_shares = existing["shares"] + shares
+            existing["avg_price"] = round(total_cost / total_shares)
+            existing["shares"] = total_shares
+            if kr_name:
+                existing["name"] = kr_name
+        else:
+            stock_list.append({"ticker": ticker, "name": kr_name or ticker,
+                                "shares": shares, "avg_price": price, "currency": "KRW"})
+        return f"포트폴리오 기록 완료: {kr_name or ticker} {shares}주 @ {price:,.0f}원"
+    else:
+        stock_list = config["portfolio"]["us_stocks"]
+        existing = next((s for s in stock_list if s["ticker"] == ticker), None)
+        if existing:
+            total_cost = existing["avg_price"] * existing["shares"] + price * shares
+            total_shares = existing["shares"] + shares
+            existing["avg_price"] = round(total_cost / total_shares, 2)
+            existing["shares"] = total_shares
+        else:
+            stock_list.append({"ticker": ticker, "shares": shares,
+                                "avg_price": price, "currency": "USD"})
+        return f"포트폴리오 기록 완료: {ticker} {shares}주 @ ${price:.2f}"
+
+
 def handle_sell(args, config):
     if len(args) < 2:
-        return "사용법: /sell &lt;종목&gt; &lt;수량&gt;\n예: /sell AAPL 5"
+        return (
+            "사용법: /sell &lt;종목&gt; &lt;수량&gt; [매도가] [실주문]\n"
+            "예: /sell AAPL 5\n"
+            "실제 주문: /sell AAPL 5 150.0 실주문"
+        )
 
     ticker = args[0].upper()
     try:
@@ -928,7 +1017,32 @@ def handle_sell(args, config):
     except ValueError:
         return "수량은 숫자로 입력해주세요."
 
+    price = 0.0
+    if len(args) > 2:
+        try:
+            price = float(args[2])
+        except ValueError:
+            pass
+
+    real_order = "실주문" in args
     is_kr = ticker.isdigit()
+
+    # KIS 실제 주문
+    if real_order and kis_api.is_configured():
+        if is_kr:
+            kis_result = kis_api.place_kr_order(ticker, "sell", int(shares), int(price))
+        else:
+            kis_result = kis_api.place_us_order(ticker, "sell", int(shares), price)
+        # 포트폴리오에서도 제거
+        portfolio_result = _update_portfolio_sell(ticker, shares, is_kr, config)
+        save_config(config)
+        return f"{kis_result}\n\n{portfolio_result}"
+
+    return _update_portfolio_sell(ticker, shares, is_kr, config)
+
+
+def _update_portfolio_sell(ticker, shares, is_kr, config):
+    """포트폴리오에서 매도 기록."""
     stock_list = config["portfolio"]["kr_stocks" if is_kr else "us_stocks"]
     existing = next((s for s in stock_list if s["ticker"] == ticker), None)
 
@@ -968,12 +1082,15 @@ def handle_reset():
 def handle_help():
     return (
         "<b>사용 가능한 명령어</b>\n\n"
-        "/buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명]\n"
+        "/buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명] [실주문]\n"
         "  예: /buy AAPL 10 150.5\n"
-        "  예: /buy 424980 44 14340 마이크로투나노\n\n"
-        "/sell &lt;종목&gt; &lt;수량&gt;\n"
-        "  예: /sell AAPL 5\n\n"
-        "/portfolio - 현재 보유종목 확인\n"
+        "  예: /buy 424980 44 14340 마이크로투나노\n"
+        "  실제주문: /buy AAPL 10 150.5 실주문\n\n"
+        "/sell &lt;종목&gt; &lt;수량&gt; [매도가] [실주문]\n"
+        "  예: /sell AAPL 5\n"
+        "  실제주문: /sell AAPL 5 150.0 실주문\n\n"
+        "/portfolio - 포트폴리오 기록 확인\n"
+        "/balance - 한투 실제 계좌 잔고 조회\n"
         "/report - 즉시 리포트 받기\n"
         "/reset - 대화 기록 초기화\n"
         "/help - 도움말\n\n"
@@ -1005,6 +1122,8 @@ def process_update(update, config):
             save_config(config)
         elif command == "/portfolio":
             response = handle_portfolio(config)
+        elif command == "/balance":
+            response = handle_balance()
         elif command == "/report":
             from stock_alert import build_message
             response = build_message(config)

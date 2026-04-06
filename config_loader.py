@@ -63,6 +63,17 @@ def load_config() -> dict:
     if os.environ.get("TELEGRAM_CHAT_ID"):
         tg["chat_id"] = os.environ["TELEGRAM_CHAT_ID"]
 
+    # KIS API 환경변수 지원
+    kis = config.setdefault("kis", {})
+    if os.environ.get("KIS_APP_KEY"):
+        kis["app_key"] = os.environ["KIS_APP_KEY"]
+    if os.environ.get("KIS_APP_SECRET"):
+        kis["app_secret"] = os.environ["KIS_APP_SECRET"]
+    if os.environ.get("KIS_ACCOUNT_NO"):
+        kis["account_no"] = os.environ["KIS_ACCOUNT_NO"]
+    if os.environ.get("KIS_ACCOUNT_CD"):
+        kis["account_product_cd"] = os.environ["KIS_ACCOUNT_CD"]
+
     return config
 
 
