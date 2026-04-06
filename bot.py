@@ -1108,8 +1108,7 @@ def handle_help():
         "/sell &lt;종목&gt; &lt;수량&gt; [매도가] [실주문]\n"
         "  예: /sell AAPL 5\n"
         "  실제주문: /sell AAPL 5 150.0 실주문\n\n"
-        "/portfolio - 포트폴리오 기록 확인\n"
-        "/balance - 한투 실제 계좌 잔고 조회\n"
+        "/portfolio - 한투 실제 계좌 잔고 조회\n"
         "/report - 즉시 리포트 받기\n"
         "/reset - 대화 기록 초기화\n"
         "/help - 도움말\n\n"
@@ -1139,10 +1138,8 @@ def process_update(update, config):
         elif command == "/sell":
             response = handle_sell(args, config)
             save_config(config)
-        elif command == "/portfolio":
+        elif command in ("/portfolio", "/balance"):
             response = handle_portfolio(config)
-        elif command == "/balance":
-            response = handle_balance()
         elif command == "/report":
             from stock_alert import build_message
             response = build_message(config)

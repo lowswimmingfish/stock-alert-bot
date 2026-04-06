@@ -178,18 +178,26 @@ def get_kr_balance() -> str:
         output1 = data.get("output1", [])  # 종목별 잔고
         output2 = data.get("output2", [{}])  # 계좌 총평가
 
+        def safe_int(v):
+            try: return int(float(str(v).replace(",", "") or 0))
+            except: return 0
+
+        def safe_float(v):
+            try: return float(str(v).replace(",", "") or 0)
+            except: return 0.0
+
         lines = ["🇰🇷 <b>국내주식 잔고</b>"]
-        total_eval   = int(output2[0].get("scts_evlu_amt", 0)) if output2 else 0
-        total_profit = int(output2[0].get("evlu_pfls_smtl_amt", 0)) if output2 else 0
-        total_pct    = float(output2[0].get("evlu_erng_rt", 0)) if output2 else 0
+        total_eval   = safe_int(output2[0].get("scts_evlu_amt", 0)) if output2 else 0
+        total_profit = safe_int(output2[0].get("evlu_pfls_smtl_amt", 0)) if output2 else 0
+        total_pct    = safe_float(output2[0].get("evlu_erng_rt", 0)) if output2 else 0.0
 
         for item in output1:
             name      = item.get("prdt_name", "")
-            qty       = int(item.get("hldg_qty", 0))
-            avg_price = int(float(item.get("pchs_avg_pric", 0)))
-            curr      = int(item.get("prpr", 0))
-            profit    = int(item.get("evlu_pfls_amt", 0))
-            pct       = float(item.get("evlu_pfls_rt", 0))
+            qty       = safe_int(item.get("hldg_qty", 0))
+            avg_price = safe_int(item.get("pchs_avg_pric", 0))
+            curr      = safe_int(item.get("prpr", 0))
+            profit    = safe_int(item.get("evlu_pfls_amt", 0))
+            pct       = safe_float(item.get("evlu_pfls_rt", 0))
             if qty == 0:
                 continue
             sign = "📈" if profit >= 0 else "📉"
