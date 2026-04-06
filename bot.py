@@ -58,15 +58,26 @@ KR_STOCK_MAP = {
 
 
 def get_portfolio_context(config):
-    """Build a context string about the user's portfolio for Claude."""
-    lines = ["현재 포트폴리오:"]
-    lines.append("\n[미국 주식]")
-    for s in config["portfolio"]["us_stocks"]:
-        lines.append(f"- {s['ticker']}: {s['shares']}주, 평균매수가 ${s['avg_price']}")
-    lines.append("\n[한국 주식]")
-    for s in config["portfolio"]["kr_stocks"]:
-        name = s.get("name", s["ticker"])
-        lines.append(f"- {name}({s['ticker']}): {s['shares']}주, 평균매수가 {s['avg_price']}원")
+    """Build a context string about the user's portfolio for Claude (KIS 실계좌 우선)."""
+    if kis_api.is_configured():
+        try:
+            return "현재 포트폴리오 (한국투자증권 실계좌):\n" + kis_api.get_full_balance()
+        except Exception:
+            pass
+
+    # KIS 실패 시 수동 기록 fallback
+    lines = ["현재 포트폴리오 (수동 기록):"]
+    us = config["portfolio"].get("us_stocks", [])
+    kr = config["portfolio"].get("kr_stocks", [])
+    if us:
+        lines.append("\n[미국 주식]")
+        for s in us:
+            lines.append(f"- {s['ticker']}: {s['shares']}주, 평균매수가 ${s['avg_price']}")
+    if kr:
+        lines.append("\n[한국 주식]")
+        for s in kr:
+            name = s.get("name", s["ticker"])
+            lines.append(f"- {name}({s['ticker']}): {s['shares']}주, 평균매수가 {s['avg_price']}원")
     return "\n".join(lines)
 
 
@@ -1060,17 +1071,25 @@ def _update_portfolio_sell(ticker, shares, is_kr, config):
 
 
 def handle_portfolio(config):
-    lines = ["<b>현재 포트폴리오</b>", ""]
-    if config["portfolio"]["us_stocks"]:
+    """KIS 실계좌 잔고 우선, 없으면 수동 기록 표시."""
+    if kis_api.is_configured():
+        return kis_api.get_full_balance()
+
+    lines = ["<b>현재 포트폴리오 (수동 기록)</b>", ""]
+    us = config["portfolio"].get("us_stocks", [])
+    kr = config["portfolio"].get("kr_stocks", [])
+    if us:
         lines.append("<b>US Stocks:</b>")
-        for s in config["portfolio"]["us_stocks"]:
+        for s in us:
             lines.append(f"  {s['ticker']}: {s['shares']}주 @ ${s['avg_price']:,.2f}")
         lines.append("")
-    if config["portfolio"]["kr_stocks"]:
+    if kr:
         lines.append("<b>KR Stocks:</b>")
-        for s in config["portfolio"]["kr_stocks"]:
+        for s in kr:
             name = s.get("name", s["ticker"])
             lines.append(f"  {name}: {s['shares']}주 @ {s['avg_price']:,.0f}원")
+    if not us and not kr:
+        lines.append("보유 종목 없음")
     return "\n".join(lines)
 
 

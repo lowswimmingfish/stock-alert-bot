@@ -13,13 +13,8 @@ _PORTFOLIO_FILE = DATA_DIR / "portfolio.json"
 
 
 DEFAULT_PORTFOLIO = {
-    "holdings": [
-        {"ticker": "CORN", "exchange": "US", "avg_price": 18.69, "shares": 22},
-        {"ticker": "NTR",  "exchange": "US", "avg_price": 78.65, "shares": 1},
-        {"ticker": "VOO",  "exchange": "US", "avg_price": 626.51, "shares": 0.270143},
-        {"ticker": "MSFT", "exchange": "US", "avg_price": 443.61, "shares": 2.964648},
-        {"ticker": "950160", "exchange": "KR", "name": "마이크로투나노", "avg_price": 14340, "shares": 44}
-    ]
+    "us_stocks": [],
+    "kr_stocks": []
 }
 
 
