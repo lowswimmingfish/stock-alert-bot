@@ -53,19 +53,33 @@ def get_token() -> str:
         return cached
 
     app_key, app_secret, _, _ = _get_credentials()
-    body = json.dumps({
+
+    if not app_key or not app_secret:
+        raise ValueError("KIS_APP_KEY 또는 KIS_APP_SECRET 환경변수가 설정되지 않았습니다.")
+
+    logger.info(f"KIS 토큰 요청 - app_key: {app_key[:8]}...")
+
+    body = {
         "grant_type": "client_credentials",
         "appkey": app_key,
         "appsecret": app_secret,
-    })
+    }
     resp = requests.post(
         f"{BASE_URL}/oauth2/tokenP",
-        headers={"content-type": "application/json; charset=utf-8"},
-        data=body,
+        headers={"content-type": "application/json"},
+        json=body,
         timeout=10,
     )
-    resp.raise_for_status()
+
+    logger.info(f"KIS 토큰 응답 status={resp.status_code} body={resp.text[:200]}")
+
+    if resp.status_code != 200:
+        raise Exception(f"토큰 발급 실패 ({resp.status_code}): {resp.text[:300]}")
+
     data = resp.json()
+    if "access_token" not in data:
+        raise Exception(f"토큰 없음: {data}")
+
     token = data["access_token"]
     expires_in = int(data.get("expires_in", 86400))
     _save_token(token, expires_in)
@@ -87,7 +101,7 @@ def _headers(tr_id: str) -> dict:
 
 # ── 현재가 조회 ──────────────────────────────────────
 
-def get_kr_price(ticker: str) -> dict | None:
+def get_kr_price(ticker: str):
     """국내주식 현재가 조회."""
     try:
         resp = requests.get(
@@ -109,7 +123,7 @@ def get_kr_price(ticker: str) -> dict | None:
         return None
 
 
-def get_us_price(ticker: str, market: str = "NAS") -> dict | None:
+def get_us_price(ticker: str, market: str = "NAS"):
     """해외주식 현재가 조회.
     market: NAS(나스닥), NYS(뉴욕), AMS(아멕스)
     """
