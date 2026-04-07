@@ -438,17 +438,23 @@ def get_us_balance_raw() -> dict:
                 "invested": invested,
             })
 
-        total = {}
-        if output2:
-            invested_us = sum(h["invested"] for h in holdings)
-            profit_us = safe_float(output2[0].get("ovrs_tot_pfls", 0))
-            pct_us = round(profit_us / invested_us * 100, 2) if invested_us else 0
-            total = {
-                "eval_amt": safe_float(output2[0].get("tot_frcr_cblc_smtl", 0)),
-                "profit": profit_us,
-                "profit_pct": pct_us,
-                "invested": invested_us,
-            }
+        # output2는 리스트 또는 딕셔너리로 올 수 있음
+        if isinstance(output2, list) and output2:
+            o2 = output2[0]
+        elif isinstance(output2, dict):
+            o2 = output2
+        else:
+            o2 = {}
+
+        invested_us = sum(h["invested"] for h in holdings)
+        profit_us   = safe_float(o2.get("ovrs_tot_pfls", 0))
+        pct_us      = round(profit_us / invested_us * 100, 2) if invested_us else 0
+        total = {
+            "eval_amt":   safe_float(o2.get("tot_frcr_cblc_smtl", sum(h["eval_amt"] for h in holdings))),
+            "profit":     profit_us,
+            "profit_pct": pct_us,
+            "invested":   invested_us,
+        }
         result = {"holdings": holdings, "total": total}
         _set_cached("us_raw", result)
         return result
