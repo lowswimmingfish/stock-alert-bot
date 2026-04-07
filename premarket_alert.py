@@ -177,12 +177,13 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
 
 
 def main():
-    # Mac 절전 후 뒤늦게 실행될 경우 무시 (21:00~22:30 범위 밖이면 스킵)
-    hour = datetime.now().hour
-    minute = datetime.now().minute
-    in_window = (hour == 21) or (hour == 22 and minute <= 30)
+    # 08:00~09:30 ET 범위 밖이면 스킵 (DST 자동 반영)
+    import pytz
+    now_et = datetime.now(pytz.timezone("America/New_York"))
+    t = now_et.hour * 60 + now_et.minute
+    in_window = (8 * 60) <= t <= (9 * 60 + 30)
     if not in_window:
-        print(f"Skipped: outside allowed window (current: {hour:02d}:{minute:02d})")
+        print(f"Skipped: outside window (ET: {now_et.strftime('%H:%M')})")
         return
 
     config = load_config()

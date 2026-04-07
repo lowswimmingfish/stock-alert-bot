@@ -156,9 +156,6 @@ def get_live_prices(config):
     with ThreadPoolExecutor(max_workers=8) as ex:
         us_futures = {ex.submit(_fetch_us_price, s): s for s in us_stocks}
         kr_futures = {ex.submit(_fetch_kr_price, s): s for s in kr_stocks}
-        extra_futures = {
-            ex.submit(lambda: yf.Ticker("USDKRW=X").history(period="1d")): "fx",
-        }
         for fut in as_completed(us_futures):
             r = fut.result()
             if r:
@@ -926,6 +923,31 @@ def handle_balance():
     return kis_api.get_full_balance()
 
 
+def _check_market_open(is_kr: bool) -> str | None:
+    """장 개장 여부 확인. 장 외 시간이면 경고 메시지 반환, 아니면 None."""
+    import pytz
+    now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
+    now_et  = datetime.now(pytz.timezone("America/New_York"))
+    weekday = now_kst.weekday()  # 0=월, 6=일
+
+    if weekday >= 5:
+        return "⚠️ 오늘은 주말이라 시장이 닫혀있습니다."
+
+    if is_kr:
+        # 한국장 09:00~15:30 KST
+        open_h, open_m   = 9, 0
+        close_h, close_m = 15, 30
+        t = now_kst.hour * 60 + now_kst.minute
+        if not (open_h * 60 + open_m <= t <= close_h * 60 + close_m):
+            return f"⚠️ 한국장 마감 시간입니다. (개장: 09:00~15:30 KST, 현재: {now_kst.strftime('%H:%M')} KST)"
+    else:
+        # 미국장 09:30~16:00 ET (EDT/EST 자동 반영)
+        t = now_et.hour * 60 + now_et.minute
+        if not (9 * 60 + 30 <= t <= 16 * 60):
+            return f"⚠️ 미국장 마감 시간입니다. (개장: 09:30~16:00 ET, 현재: {now_et.strftime('%H:%M')} ET)"
+    return None
+
+
 def handle_buy(args, config):
     if len(args) < 3:
         return (
@@ -947,6 +969,10 @@ def handle_buy(args, config):
 
     if not kis_api.is_configured():
         return "❌ KIS API가 설정되지 않았습니다."
+
+    warn = _check_market_open(is_kr)
+    if warn:
+        return warn
 
     if is_kr:
         return kis_api.place_kr_order(ticker, "buy", int(shares), int(price))
@@ -980,6 +1006,10 @@ def handle_sell(args, config):
 
     if not kis_api.is_configured():
         return "❌ KIS API가 설정되지 않았습니다."
+
+    warn = _check_market_open(is_kr)
+    if warn:
+        return warn
 
     if is_kr:
         return kis_api.place_kr_order(ticker, "sell", int(shares), int(price))
@@ -1055,6 +1085,8 @@ def process_update(update, config):
             response = handle_portfolio(config)
         elif command == "/report":
             from stock_alert import build_message
+            kis_api.invalidate_balance_cache()
+            _save_price_cache("")  # 시세 캐시도 초기화
             response = build_message(config)
         elif command == "/reset":
             response = handle_reset()

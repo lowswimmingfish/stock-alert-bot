@@ -14,6 +14,26 @@ logger = logging.getLogger(__name__)
 BASE_URL = "https://openapi.koreainvestment.com:9443"
 TOKEN_CACHE = DATA_DIR / "kis_token.json"
 
+# ── 잔고 인메모리 캐시 (5분 TTL) ─────────────────────
+_balance_cache: dict = {}
+_BALANCE_TTL = 300  # 5분
+
+
+def _get_cached(key: str):
+    entry = _balance_cache.get(key)
+    if entry and time.time() - entry["ts"] < _BALANCE_TTL:
+        return entry["data"]
+    return None
+
+
+def _set_cached(key: str, data):
+    _balance_cache[key] = {"ts": time.time(), "data": data}
+
+
+def invalidate_balance_cache():
+    """잔고 캐시 강제 초기화 (report 호출 시 사용)."""
+    _balance_cache.clear()
+
 
 # ── 토큰 관리 ────────────────────────────────────────
 
@@ -277,7 +297,10 @@ def get_full_balance() -> str:
 
 
 def get_kr_balance_raw() -> dict:
-    """국내주식 잔고 raw 데이터 반환 (report 용)."""
+    """국내주식 잔고 raw 데이터 반환 (5분 캐시)."""
+    cached = _get_cached("kr_raw")
+    if cached is not None:
+        return cached
     try:
         app_key, app_secret, account_no, account_cd = _get_credentials()
         resp = requests.get(
@@ -336,14 +359,19 @@ def get_kr_balance_raw() -> dict:
                 "profit_pct": pct,
                 "invested":   invested,
             }
-        return {"holdings": holdings, "total": total}
+        result = {"holdings": holdings, "total": total}
+        _set_cached("kr_raw", result)
+        return result
     except Exception as e:
         logger.error(f"KIS 국내 raw 잔고 오류: {e}")
         return {"holdings": [], "total": {}}
 
 
 def get_us_balance_raw() -> dict:
-    """해외주식 잔고 raw 데이터 반환 (report 용)."""
+    """해외주식 잔고 raw 데이터 반환 (5분 캐시)."""
+    cached = _get_cached("us_raw")
+    if cached is not None:
+        return cached
     try:
         app_key, app_secret, account_no, account_cd = _get_credentials()
         resp = requests.get(
@@ -389,11 +417,18 @@ def get_us_balance_raw() -> dict:
 
         total = {}
         if output2:
+            invested_us = sum(h["invested"] for h in holdings)
+            profit_us = safe_float(output2[0].get("ovrs_tot_pfls", 0))
+            pct_us = round(profit_us / invested_us * 100, 2) if invested_us else 0
             total = {
                 "eval_amt": safe_float(output2[0].get("tot_frcr_cblc_smtl", 0)),
-                "profit": safe_float(output2[0].get("ovrs_tot_pfls", 0)),
+                "profit": profit_us,
+                "profit_pct": pct_us,
+                "invested": invested_us,
             }
-        return {"holdings": holdings, "total": total}
+        result = {"holdings": holdings, "total": total}
+        _set_cached("us_raw", result)
+        return result
     except Exception as e:
         logger.error(f"KIS 해외 raw 잔고 오류: {e}")
         return {"holdings": [], "total": {}}

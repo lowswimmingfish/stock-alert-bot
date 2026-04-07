@@ -14,6 +14,7 @@ logging.basicConfig(
 logger = logging.getLogger("main")
 
 KST = pytz.timezone("Asia/Seoul")
+ET  = pytz.timezone("America/New_York")  # DST 자동 반영 (EDT/EST)
 
 
 def run_daily_report():
@@ -51,10 +52,10 @@ def start_scheduler():
         name="Daily Portfolio Report",
     )
 
-    # 매일 오후 9시 30분 (KST) - 미장 개장 약 1시간 전
+    # 미국장 개장(09:30 ET) 1시간 전 = 08:30 ET (EDT/EST 자동 반영)
     scheduler.add_job(
         run_premarket,
-        CronTrigger(hour=21, minute=30, timezone=KST),
+        CronTrigger(hour=8, minute=30, timezone=ET),
         id="premarket",
         name="Pre-market Briefing",
     )
