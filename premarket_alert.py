@@ -188,16 +188,7 @@ def main():
 
     config = load_config()
 
-    # 1. 일일 포트폴리오 리포트 먼저 전송
-    try:
-        from stock_alert import build_message
-        report_msg = build_message(config)
-        send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], report_msg)
-        print(f"Pre-market report sent at {datetime.now()}")
-    except Exception as e:
-        print(f"Report error: {e}")
-
-    # 2. 미장 개장 전 브리핑 전송
+    # 미장 개장 전 브리핑만 전송 (리포트는 매일 8시 KST에 별도 발송)
     msg = build_premarket_briefing(config)
     send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], msg)
     print(f"Pre-market briefing sent at {datetime.now()}")

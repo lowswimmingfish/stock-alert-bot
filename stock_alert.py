@@ -218,19 +218,40 @@ def build_message(config):
             lines.append(f"  {pe} KR합계: {t.get('eval_amt', 0):,}원 | 손익 {t.get('profit', 0):+,}원 ({t.get('profit_pct', 0):+.1f}%)")
         lines.append("")
 
-        # 해외주식
+        # 해외주식 - yfinance fast_info로 실시간 가격 보정
         lines.append("<b>🇺🇸 US Stocks (실계좌)</b>")
+        us_total_eval = 0
+        us_total_profit = 0
+        us_total_invested = 0
         for h in us_data["holdings"]:
-            pe = "📈" if h["profit"] >= 0 else "📉"
-            lines.append(f"  {pe} <b>{h['ticker']}</b>: ${h['curr_price']:.2f} | {h['qty']}주 | 평단 ${h['avg_price']:.2f}")
-            lines.append(f"       손익 ${h['profit']:+.2f} ({h['profit_pct']:+.1f}%)")
-        if us_data["total"]:
-            t = us_data["total"]
-            pe = "📈" if t.get("profit", 0) >= 0 else "📉"
-            invested_us = t.get("invested", 0)
-            profit_us = t.get("profit", 0)
-            pct_us = round(profit_us / invested_us * 100, 1) if invested_us else 0
-            lines.append(f"  {pe} US합계: ${t.get('eval_amt', 0):,.2f} | 손익 ${profit_us:+,.2f} ({pct_us:+.1f}%)")
+            ticker = h["ticker"]
+            curr = h["curr_price"]
+            avg  = h["avg_price"]
+            qty  = h["qty"]
+            # yfinance 실시간 가격으로 덮어쓰기
+            try:
+                fi = yf.Ticker(ticker).fast_info
+                yf_price = fi.last_price
+                yf_prev  = fi.previous_close
+                if yf_price and yf_price > 0:
+                    curr = yf_price
+                    day_chg = f" ({(curr - yf_prev) / yf_prev * 100:+.2f}%)" if yf_prev else ""
+                else:
+                    day_chg = ""
+            except Exception:
+                day_chg = ""
+            profit  = (curr - avg) * qty
+            pct     = profit / (avg * qty) * 100 if avg * qty else 0
+            us_total_eval    += curr * qty
+            us_total_profit  += profit
+            us_total_invested += avg * qty
+            pe = "📈" if profit >= 0 else "📉"
+            lines.append(f"  {pe} <b>{ticker}</b>: ${curr:.2f}{day_chg} | {qty}주 | 평단 ${avg:.2f}")
+            lines.append(f"       손익 ${profit:+.2f} ({pct:+.1f}%)")
+        if us_data["holdings"]:
+            pct_total = round(us_total_profit / us_total_invested * 100, 1) if us_total_invested else 0
+            pe = "📈" if us_total_profit >= 0 else "📉"
+            lines.append(f"  {pe} US합계: ${us_total_eval:,.2f} | 손익 ${us_total_profit:+,.2f} ({pct_total:+.1f}%)")
         lines.append("")
 
         # 전체 합산 (원화 환산)
