@@ -379,27 +379,31 @@ def get_us_balance_raw() -> dict:
         return cached
     try:
         app_key, app_secret, account_no, account_cd = _get_credentials()
-        resp = requests.get(
-            f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
-            headers=_headers("TTTS3012R"),
-            params={
-                "CANO": account_no, "ACNT_PRDT_CD": account_cd,
-                "WCRC_FRCR_DVSN_CD": "01",  # 01=USD
-                "NATN_CD": "840",
-                "TR_MKET_CD": "00",
-                "INQR_DVSN_CD": "00",
-                "CTX_AREA_FK200": "", "CTX_AREA_NK200": "",
-            },
-            timeout=10,
-        )
-        data = resp.json()
-        logger.info(f"KIS 해외잔고 rt_cd={data.get('rt_cd')} msg={data.get('msg1','')[:80]} output1_len={len(data.get('output1',[]))}")
-        if data.get("rt_cd") not in ("0", None) and data.get("rt_cd") != 0:
-            logger.error(f"KIS 해외 잔고 API 오류: {data.get('msg1', '')} (rt_cd={data.get('rt_cd')})")
-            return {"holdings": [], "total": {}}
 
-        output1 = data.get("output1", [])
-        output2 = data.get("output2", [{}])
+        # 거래소별로 호출해서 합산 (NASD, NYSE, AMEX)
+        all_output1 = []
+        for excg in ["NASD", "NYSE", "AMEX"]:
+            r = requests.get(
+                f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
+                headers=_headers("TTTS3012R"),
+                params={
+                    "CANO": account_no, "ACNT_PRDT_CD": account_cd,
+                    "OVRS_EXCG_CD": excg,
+                    "TR_CRCY_CD": "USD",
+                    "CTX_AREA_FK200": "", "CTX_AREA_NK200": "",
+                },
+                timeout=10,
+            )
+            d = r.json()
+            if d.get("rt_cd") == "0":
+                all_output1.extend(d.get("output1", []))
+            else:
+                logger.warning(f"KIS 해외잔고 {excg}: {d.get('msg1','')}")
+
+        # output2는 마지막 성공 응답에서
+        output2 = d.get("output2", [{}]) if d.get("rt_cd") == "0" else [{}]
+        output1 = all_output1
+        logger.info(f"KIS 해외잔고 총 종목수: {len(output1)}")
 
         def safe_float(v):
             try: return float(str(v).replace(",", "") or 0)
