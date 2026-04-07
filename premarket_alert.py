@@ -20,7 +20,7 @@ def send_telegram(bot_token, chat_id, text):
 
 
 def get_futures():
-    """Fetch major US futures and overnight data."""
+    """Fetch major US futures and overnight data (real-time via fast_info)."""
     futures = {
         "S&P500 선물": "ES=F",
         "나스닥 선물": "NQ=F",
@@ -32,15 +32,12 @@ def get_futures():
     results = {}
     for name, ticker in futures.items():
         try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                prev = hist["Close"].iloc[-2]
-                curr = hist["Close"].iloc[-1]
+            fi = yf.Ticker(ticker).fast_info
+            curr, prev = fi.last_price, fi.previous_close
+            if curr and prev:
                 pct = (curr - prev) / prev * 100
                 results[name] = {"price": round(curr, 2), "change_pct": round(pct, 2)}
-            elif len(hist) == 1:
-                curr = hist["Close"].iloc[-1]
+            elif curr:
                 results[name] = {"price": round(curr, 2), "change_pct": 0}
         except Exception:
             pass
@@ -49,13 +46,10 @@ def get_futures():
 
 def get_exchange_rate():
     try:
-        t = yf.Ticker("USDKRW=X")
-        hist = t.history(period="2d")
-        if len(hist) >= 2:
-            prev = hist["Close"].iloc[-2]
-            curr = hist["Close"].iloc[-1]
-            pct = (curr - prev) / prev * 100
-            return {"rate": round(curr, 2), "change_pct": round(pct, 2)}
+        fi = yf.Ticker("USDKRW=X").fast_info
+        rate, prev = fi.last_price, fi.previous_close
+        change_pct = (rate - prev) / prev * 100 if rate and prev else 0
+        return {"rate": round(rate or 0, 2), "change_pct": round(change_pct, 2)}
     except Exception:
         pass
     return {"rate": 0, "change_pct": 0}

@@ -23,24 +23,20 @@ def send_telegram(bot_token, chat_id, message):
 
 
 def get_us_stock_data(tickers):
-    """Fetch current US stock prices and daily changes."""
+    """Fetch current US stock prices and daily changes (real-time via fast_info)."""
     results = {}
     for ticker in tickers:
         try:
             t = yf.Ticker(ticker)
-            info = t.fast_info
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                prev_close = hist["Close"].iloc[-2]
-                current = hist["Close"].iloc[-1]
+            fi = t.fast_info
+            current = fi.last_price
+            prev_close = fi.previous_close
+            if current and prev_close:
                 change_pct = (current - prev_close) / prev_close * 100
-            elif len(hist) == 1:
-                current = hist["Close"].iloc[-1]
-                change_pct = 0
             else:
-                continue
+                change_pct = 0
             results[ticker] = {
-                "price": round(current, 2),
+                "price": round(current or 0, 2),
                 "change_pct": round(change_pct, 2),
             }
         except Exception as e:
@@ -77,7 +73,7 @@ def get_kr_stock_data(tickers):
 
 
 def get_market_indices():
-    """Fetch major market indices."""
+    """Fetch major market indices (real-time via fast_info)."""
     indices = {
         "S&P 500": "^GSPC",
         "NASDAQ": "^IXIC",
@@ -92,11 +88,10 @@ def get_market_indices():
     results = {}
     for name, ticker in indices.items():
         try:
-            t = yf.Ticker(ticker)
-            hist = t.history(period="2d")
-            if len(hist) >= 2:
-                prev = hist["Close"].iloc[-2]
-                curr = hist["Close"].iloc[-1]
+            fi = yf.Ticker(ticker).fast_info
+            curr = fi.last_price
+            prev = fi.previous_close
+            if curr and prev:
                 change_pct = (curr - prev) / prev * 100
                 results[name] = {
                     "price": round(curr, 2),
@@ -133,18 +128,13 @@ USD/KRW: {fx['rate']} ({fx['change_pct']:+.2f}%)
 
 
 def get_exchange_rate():
-    """Fetch USD/KRW exchange rate."""
+    """Fetch USD/KRW exchange rate (real-time via fast_info)."""
     try:
-        t = yf.Ticker("USDKRW=X")
-        hist = t.history(period="2d")
-        if len(hist) >= 1:
-            rate = hist["Close"].iloc[-1]
-            if len(hist) >= 2:
-                prev = hist["Close"].iloc[-2]
-                change_pct = (rate - prev) / prev * 100
-            else:
-                change_pct = 0
-            return {"rate": round(rate, 2), "change_pct": round(change_pct, 2)}
+        fi = yf.Ticker("USDKRW=X").fast_info
+        rate = fi.last_price
+        prev = fi.previous_close
+        change_pct = (rate - prev) / prev * 100 if rate and prev else 0
+        return {"rate": round(rate or 0, 2), "change_pct": round(change_pct, 2)}
     except Exception:
         pass
     return {"rate": 0, "change_pct": 0}

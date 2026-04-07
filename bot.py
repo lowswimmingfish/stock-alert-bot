@@ -97,13 +97,14 @@ def _save_price_cache(text):
 
 def _fetch_us_price(s):
     try:
-        hist = yf.Ticker(s["ticker"]).history(period="2d")
-        if len(hist) >= 2:
-            price, prev = hist["Close"].iloc[-1], hist["Close"].iloc[-2]
+        fi = yf.Ticker(s["ticker"]).fast_info
+        price = fi.last_price
+        prev = fi.previous_close
+        if price and prev:
             pct = (price - prev) / prev * 100
             return f"- {s['ticker']}: ${price:.2f} ({pct:+.2f}%)"
-        elif len(hist) == 1:
-            return f"- {s['ticker']}: ${hist['Close'].iloc[-1]:.2f}"
+        elif price:
+            return f"- {s['ticker']}: ${price:.2f}"
     except Exception:
         pass
     return None
@@ -169,9 +170,8 @@ def get_live_prices(config):
 
     # 환율
     try:
-        hist = yf.Ticker("USDKRW=X").history(period="1d")
-        if len(hist) >= 1:
-            lines.append(f"\n환율: 1 USD = {hist['Close'].iloc[-1]:,.2f} KRW")
+        fi = yf.Ticker("USDKRW=X").fast_info
+        lines.append(f"\n환율: 1 USD = {fi.last_price:,.2f} KRW")
     except Exception:
         pass
 
@@ -182,9 +182,9 @@ def get_live_prices(config):
         def fetch_idx(name_sym):
             name, sym = name_sym
             try:
-                hist = yf.Ticker(sym).history(period="2d")
-                if len(hist) >= 2:
-                    curr, prev = hist["Close"].iloc[-1], hist["Close"].iloc[-2]
+                fi = yf.Ticker(sym).fast_info
+                curr, prev = fi.last_price, fi.previous_close
+                if curr and prev:
                     pct = (curr - prev) / prev * 100
                     return f"- {name}: {curr:,.2f} ({pct:+.2f}%)"
             except Exception:
@@ -391,7 +391,7 @@ def get_fear_greed() -> str:
 
 
 def get_macro_data() -> str:
-    """Fetch key macro indicators: US10Y, DXY, VIX, Gold, Oil."""
+    """Fetch key macro indicators: US10Y, DXY, VIX, Gold, Oil (real-time)."""
     tickers = {
         "미국10년물금리": "^TNX",
         "달러인덱스(DXY)": "DX-Y.NYB",
@@ -404,14 +404,13 @@ def get_macro_data() -> str:
     lines = ["[주요 매크로 지표]"]
     for name, sym in tickers.items():
         try:
-            hist = yf.Ticker(sym).history(period="2d")
-            if len(hist) >= 2:
-                curr = hist["Close"].iloc[-1]
-                prev = hist["Close"].iloc[-2]
+            fi = yf.Ticker(sym).fast_info
+            curr, prev = fi.last_price, fi.previous_close
+            if curr and prev:
                 pct = (curr - prev) / prev * 100
                 lines.append(f"{name}: {curr:.2f} ({pct:+.2f}%)")
-            elif len(hist) == 1:
-                lines.append(f"{name}: {hist['Close'].iloc[-1]:.2f}")
+            elif curr:
+                lines.append(f"{name}: {curr:.2f}")
         except Exception:
             pass
     return "\n".join(lines)
