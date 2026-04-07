@@ -13,3 +13,4 @@ __pycache__/
 *.pyo
 .DS_Store
 portfolio.json
+kis_token.json
