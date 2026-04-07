@@ -418,35 +418,23 @@ def get_us_balance_raw() -> dict:
 
         holdings = []
         for item in output1:
-            logger.info(f"KIS 해외 종목 raw keys: {list(item.keys())}")
-            # 수량 필드: ovrs_cblc_qty (TTTS3012R 기준)
-            qty = safe_float(
-                item.get("ovrs_cblc_qty") or
-                item.get("cblc_qty13") or
-                item.get("hldg_qty") or 0
-            )
+            qty = safe_float(item.get("ovrs_cblc_qty", 0))
             if qty == 0:
-                logger.warning(f"qty=0 스킵: {item.get('pdno')}")
                 continue
-            avg  = safe_float(item.get("pchs_avg_pric", 0))
-            # 현재가 필드: ovrs_now_pric (TTTS3012R 기준)
-            curr = safe_float(
-                item.get("ovrs_now_pric") or
-                item.get("now_pric2") or
-                item.get("ovrs_stck_prpr") or 0
-            )
+            avg    = safe_float(item.get("pchs_avg_pric", 0))
+            curr   = safe_float(item.get("now_pric2", 0))
             profit = safe_float(item.get("frcr_evlu_pfls_amt", 0))
             invested = avg * qty
             pct = (profit / invested * 100) if invested else 0
             holdings.append({
-                "ticker": item.get("pdno", ""),
-                "name": item.get("prdt_name", item.get("pdno", "")),
+                "ticker": item.get("ovrs_pdno", ""),
+                "name": item.get("ovrs_item_name", item.get("ovrs_pdno", "")),
                 "qty": qty,
                 "avg_price": avg,
                 "curr_price": curr,
                 "profit": profit,
                 "profit_pct": round(pct, 2),
-                "eval_amt": curr * qty,
+                "eval_amt": safe_float(item.get("ovrs_stck_evlu_amt", 0)),
                 "invested": invested,
             })
 
@@ -465,8 +453,7 @@ def get_us_balance_raw() -> dict:
         _set_cached("us_raw", result)
         return result
     except Exception as e:
-        import traceback
-        logger.error(f"KIS 해외 raw 잔고 오류: {e}\n{traceback.format_exc()}")
+        logger.error(f"KIS 해외 raw 잔고 오류: {e}")
         return {"holdings": [], "total": {}}
 
 
