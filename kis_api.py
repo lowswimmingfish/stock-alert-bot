@@ -316,6 +316,11 @@ def get_kr_balance_raw() -> dict:
             timeout=10,
         )
         data = resp.json()
+        # API 오류 응답 체크
+        if data.get("rt_cd") not in ("0", None) and data.get("rt_cd") != 0:
+            logger.error(f"KIS 국내 잔고 API 오류: {data.get('msg1', '')} (rt_cd={data.get('rt_cd')})")
+            return {"holdings": [], "total": {}}
+
         output1 = data.get("output1", [])
         output2 = data.get("output2", [{}])
 
@@ -386,6 +391,10 @@ def get_us_balance_raw() -> dict:
             timeout=10,
         )
         data = resp.json()
+        if data.get("rt_cd") not in ("0", None) and data.get("rt_cd") != 0:
+            logger.error(f"KIS 해외 잔고 API 오류: {data.get('msg1', '')} (rt_cd={data.get('rt_cd')})")
+            return {"holdings": [], "total": {}}
+
         output1 = data.get("output1", [])
         output2 = data.get("output2", [{}])
 

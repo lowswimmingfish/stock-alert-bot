@@ -153,6 +153,9 @@ def format_number(n):
 
 
 def build_message(config):
+    # 항상 최신 데이터 사용 (캐시 무효화)
+    kis_api.invalidate_balance_cache()
+
     now = datetime.now()
     indices = get_market_indices()
     fx = get_exchange_rate()
