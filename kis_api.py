@@ -382,6 +382,11 @@ def get_us_balance_raw() -> dict:
 
         # 거래소별로 호출해서 합산 (NASD, NYSE, AMEX)
         all_output1 = []
+        last_output2 = [{}]
+
+        def is_success(rt):
+            return str(rt) == "0"
+
         for excg in ["NASD", "NYSE", "AMEX"]:
             r = requests.get(
                 f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
@@ -395,14 +400,16 @@ def get_us_balance_raw() -> dict:
                 timeout=10,
             )
             d = r.json()
-            if d.get("rt_cd") == "0":
+            rt = d.get("rt_cd")
+            logger.info(f"KIS 해외잔고 {excg}: rt_cd={rt}, items={len(d.get('output1', []))}")
+            if is_success(rt):
                 all_output1.extend(d.get("output1", []))
+                last_output2 = d.get("output2", [{}])
             else:
-                logger.warning(f"KIS 해외잔고 {excg}: {d.get('msg1','')}")
+                logger.warning(f"KIS 해외잔고 {excg} 오류: {d.get('msg1','')}")
 
-        # output2는 마지막 성공 응답에서
-        output2 = d.get("output2", [{}]) if d.get("rt_cd") == "0" else [{}]
         output1 = all_output1
+        output2 = last_output2
         logger.info(f"KIS 해외잔고 총 종목수: {len(output1)}")
 
         def safe_float(v):
@@ -411,11 +418,13 @@ def get_us_balance_raw() -> dict:
 
         holdings = []
         for item in output1:
-            qty = safe_float(item.get("cblc_qty13", 0))
+            # cblc_qty13 없으면 ovrs_cblc_qty 시도
+            qty = safe_float(item.get("cblc_qty13") or item.get("ovrs_cblc_qty", 0))
             if qty == 0:
+                logger.warning(f"qty=0 종목 스킵: {item.get('pdno')} raw={item}")
                 continue
             avg  = safe_float(item.get("pchs_avg_pric", 0))
-            curr = safe_float(item.get("now_pric2", 0))
+            curr = safe_float(item.get("now_pric2") or item.get("ovrs_now_pric2", 0))
             profit = safe_float(item.get("frcr_evlu_pfls_amt", 0))
             invested = avg * qty
             pct = (profit / invested * 100) if invested else 0
