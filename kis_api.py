@@ -384,13 +384,16 @@ def get_us_balance_raw() -> dict:
             headers=_headers("TTTS3012R"),
             params={
                 "CANO": account_no, "ACNT_PRDT_CD": account_cd,
-                "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840",
-                "TR_MKET_CD": "00", "INQR_DVSN_CD": "00",
+                "WCRC_FRCR_DVSN_CD": "01",  # 01=USD
+                "NATN_CD": "840",
+                "TR_MKET_CD": "00",
+                "INQR_DVSN_CD": "00",
                 "CTX_AREA_FK200": "", "CTX_AREA_NK200": "",
             },
             timeout=10,
         )
         data = resp.json()
+        logger.info(f"KIS 해외잔고 rt_cd={data.get('rt_cd')} msg={data.get('msg1','')[:80]} output1_len={len(data.get('output1',[]))}")
         if data.get("rt_cd") not in ("0", None) and data.get("rt_cd") != 0:
             logger.error(f"KIS 해외 잔고 API 오류: {data.get('msg1', '')} (rt_cd={data.get('rt_cd')})")
             return {"holdings": [], "total": {}}
