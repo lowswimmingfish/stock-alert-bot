@@ -30,13 +30,29 @@ logging.basicConfig(
 )
 
 
-def send_message(bot_token, chat_id, text):
+REPLY_KEYBOARD = {
+    "keyboard": [
+        ["📊 리포트", "💼 잔고"],
+        ["📰 뉴스브리핑", "📈 시장현황"],
+        ["❓ 도움말"],
+    ],
+    "resize_keyboard": True,
+    "persistent": True,
+}
+
+
+def send_message(bot_token, chat_id, text, reply_markup=None):
     url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
     # Telegram has 4096 char limit, split if needed
+    first = True
     while text:
         chunk = text[:4000]
         text = text[4000:]
-        requests.post(url, json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"})
+        payload = {"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"}
+        if first and reply_markup:
+            payload["reply_markup"] = reply_markup
+        first = False
+        requests.post(url, json=payload)
 
 
 def load_history():
@@ -1045,21 +1061,31 @@ def handle_reset():
 
 def handle_help():
     return (
-        "<b>사용 가능한 명령어</b>\n\n"
-        "/buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt; [한국종목명]\n"
-        "  예: /buy AAPL 10 150.5 → KIS 실매수\n"
+        "<b>📱 버튼으로 바로 실행</b>\n"
+        "아래 버튼을 탭하면 바로 실행돼요!\n\n"
+        "<b>📝 주문 명령어</b>\n"
+        "/buy &lt;종목&gt; &lt;수량&gt; &lt;매수가&gt;\n"
+        "  예: /buy AAPL 10 150.5\n"
         "  예: /buy 424980 10 15000 마이크로투나노\n\n"
         "/sell &lt;종목&gt; &lt;수량&gt; [매도가]\n"
-        "  예: /sell AAPL 5 150.0 → KIS 실매도\n\n"
-        "/portfolio - 한투 실계좌 잔고 조회\n"
-        "/report - 즉시 리포트 받기\n"
-        "/reset - 대화 기록 초기화\n"
-        "/help - 도움말\n\n"
-        "<b>자연어 질문도 가능!</b>\n"
+        "  예: /sell AAPL 5 (시장가)\n"
+        "  예: /sell AAPL 5 150.0 (지정가)\n\n"
+        "/reset - 대화 기록 초기화\n\n"
+        "<b>💬 자연어 질문도 가능!</b>\n"
         "예: 내 수익률 어때?\n"
         "예: CORN 전망이 어때?\n"
         "예: 지금 팔아야 할까?"
     )
+
+
+# 하단 버튼 → 명령어 매핑
+_BUTTON_MAP = {
+    "📊 리포트":    "/report",
+    "💼 잔고":      "/portfolio",
+    "📰 뉴스브리핑": "__premarket__",
+    "📈 시장현황":   "__macro__",
+    "❓ 도움말":    "/help",
+}
 
 
 def process_update(update, config):
@@ -1068,6 +1094,16 @@ def process_update(update, config):
     text = msg.get("text", "").strip()
     if not text:
         return None
+
+    # 버튼 텍스트 → 명령어 변환
+    text = _BUTTON_MAP.get(text, text)
+
+    # 버튼 전용 핸들러
+    if text == "__premarket__":
+        from premarket_alert import build_premarket_briefing
+        return build_premarket_briefing(config)
+    if text == "__macro__":
+        return get_macro_data()
 
     # Command handling
     if text.startswith("/"):
@@ -1084,7 +1120,7 @@ def process_update(update, config):
         elif command == "/report":
             from stock_alert import build_message
             kis_api.invalidate_balance_cache()
-            _save_price_cache("")  # 시세 캐시도 초기화
+            _save_price_cache("")
             response = build_message(config)
         elif command == "/reset":
             response = handle_reset()
@@ -1131,7 +1167,7 @@ def poll():
                 config = load_config()
                 response = process_update(update, config)
                 if response:
-                    send_message(bot_token, chat_id, response)
+                    send_message(bot_token, chat_id, response, reply_markup=REPLY_KEYBOARD)
                     logging.info(f"Processed: {update.get('message', {}).get('text', '')}")
 
         except requests.exceptions.Timeout:
