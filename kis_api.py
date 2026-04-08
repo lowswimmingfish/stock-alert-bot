@@ -173,117 +173,44 @@ def get_us_price(ticker: str, market: str = "NAS"):
 # ── 계좌 잔고 조회 ───────────────────────────────────
 
 def get_kr_balance() -> str:
-    """국내주식 잔고 조회."""
+    """국내주식 잔고 조회 (캐시 사용)."""
     try:
-        app_key, app_secret, account_no, account_cd = _get_credentials()
-        resp = requests.get(
-            f"{BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
-            headers=_headers("TTTC8434R"),
-            params={
-                "CANO": account_no,
-                "ACNT_PRDT_CD": account_cd,
-                "AFHR_FLPR_YN": "N",
-                "OFL_YN": "",
-                "INQR_DVSN": "02",
-                "UNPR_DVSN": "01",
-                "FUND_STTL_ICLD_YN": "N",
-                "FNCG_AMT_AUTO_RDPT_YN": "N",
-                "PRCS_DVSN": "01",
-                "CTX_AREA_FK100": "",
-                "CTX_AREA_NK100": "",
-            },
-            timeout=10,
-        )
-        data = resp.json()
-        output1 = data.get("output1", [])  # 종목별 잔고
-        output2 = data.get("output2", [{}])  # 계좌 총평가
-
-        def safe_int(v):
-            try: return int(float(str(v).replace(",", "") or 0))
-            except: return 0
-
-        def safe_float(v):
-            try: return float(str(v).replace(",", "") or 0)
-            except: return 0.0
-
+        data = get_kr_balance_raw()
         lines = ["🇰🇷 <b>국내주식 잔고</b>"]
-        total_eval   = safe_int(output2[0].get("scts_evlu_amt", 0)) if output2 else 0
-        total_profit = safe_int(output2[0].get("evlu_pfls_smtl_amt", 0)) if output2 else 0
-        total_pct    = safe_float(output2[0].get("evlu_erng_rt", 0)) if output2 else 0.0
-
-        for item in output1:
-            name      = item.get("prdt_name", "")
-            qty       = safe_int(item.get("hldg_qty", 0))
-            avg_price = safe_int(item.get("pchs_avg_pric", 0))
-            curr      = safe_int(item.get("prpr", 0))
-            profit    = safe_int(item.get("evlu_pfls_amt", 0))
-            pct       = safe_float(item.get("evlu_pfls_rt", 0))
-            if qty == 0:
-                continue
-            sign = "📈" if profit >= 0 else "📉"
+        for h in data["holdings"]:
+            sign = "📈" if h["profit"] >= 0 else "📉"
             lines.append(
-                f"{sign} {name}: {qty}주 | 현재가 {curr:,}원 | 평단 {avg_price:,}원 | "
-                f"손익 {profit:+,}원 ({pct:+.1f}%)"
+                f"{sign} {h['name']}: {h['qty']}주 | 현재가 {h['curr_price']:,}원 | 평단 {h['avg_price']:,}원 | "
+                f"손익 {h['profit']:+,}원 ({h['profit_pct']:+.1f}%)"
             )
-
-        lines.append("")
-        lines.append(f"국내 총평가: <b>{total_eval:,}원</b>")
-        lines.append(f"국내 손익: <b>{total_profit:+,}원 ({total_pct:+.1f}%)</b>")
+        if data["total"]:
+            t = data["total"]
+            lines.append("")
+            lines.append(f"국내 총평가: <b>{t['eval_amt']:,}원</b>")
+            lines.append(f"국내 손익: <b>{t['profit']:+,}원 ({t['profit_pct']:+.1f}%)</b>")
         return "\n".join(lines)
-
     except Exception as e:
         logger.error(f"KIS 국내 잔고 오류: {e}")
         return f"국내 잔고 조회 오류: {e}"
 
 
 def get_us_balance() -> str:
-    """해외주식 잔고 조회 (전체 통화)."""
+    """해외주식 잔고 조회 (캐시 사용)."""
     try:
-        app_key, app_secret, account_no, account_cd = _get_credentials()
-        resp = requests.get(
-            f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
-            headers=_headers("TTTS3012R"),
-            params={
-                "CANO": account_no,
-                "ACNT_PRDT_CD": account_cd,
-                "WCRC_FRCR_DVSN_CD": "02",   # 02=전체
-                "NATN_CD": "840",             # 840=미국
-                "TR_MKET_CD": "00",
-                "INQR_DVSN_CD": "00",
-                "CTX_AREA_FK200": "",
-                "CTX_AREA_NK200": "",
-            },
-            timeout=10,
-        )
-        data = resp.json()
-        output1 = data.get("output1", [])
-        output2 = data.get("output2", [{}])
-
+        data = get_us_balance_raw()
         lines = ["🇺🇸 <b>해외주식 잔고</b>"]
-        for item in output1:
-            ticker    = item.get("pdno", "")
-            qty       = float(item.get("cblc_qty13", 0))
-            avg_price = float(item.get("pchs_avg_pric", 0))
-            curr      = float(item.get("now_pric2", 0))
-            profit    = float(item.get("frcr_evlu_pfls_amt", 0))
-            pct       = float(item.get("evlu_pfls_rt", 0))
-            if qty == 0:
-                continue
-            sign = "📈" if profit >= 0 else "📉"
+        for h in data["holdings"]:
+            sign = "📈" if h["profit"] >= 0 else "📉"
             lines.append(
-                f"{sign} {ticker}: {qty}주 | ${curr:.2f} | 평단 ${avg_price:.2f} | "
-                f"손익 ${profit:+.2f} ({pct:+.1f}%)"
+                f"{sign} {h['ticker']}: {h['qty']}주 | ${h['curr_price']:.2f} | 평단 ${h['avg_price']:.2f} | "
+                f"손익 ${h['profit']:+.2f} ({h['profit_pct']:+.1f}%)"
             )
-
-        if output2:
-            total_usd = float(output2[0].get("tot_frcr_cblc_smtl", 0))
-            profit_usd = float(output2[0].get("ovrs_tot_pfls", 0))
+        if data["total"]:
+            t = data["total"]
             lines.append("")
-            lines.append(f"해외 총평가: <b>${total_usd:,.2f}</b>")
-            lines.append(f"해외 손익: <b>${profit_usd:+,.2f}</b>")
-
+            lines.append(f"해외 총평가: <b>${t['eval_amt']:,.2f}</b>")
+            lines.append(f"해외 손익: <b>${t['profit']:+,.2f}</b>")
         return "\n".join(lines)
-
     except Exception as e:
         logger.error(f"KIS 해외 잔고 오류: {e}")
         return f"해외 잔고 조회 오류: {e}"
@@ -349,13 +276,21 @@ def get_kr_balance_raw() -> dict:
                 "invested": safe_int(item.get("pchs_amt", 0)),
             })
 
+        # output2는 리스트 또는 딕셔너리로 올 수 있음
+        if isinstance(output2, list) and output2:
+            o2 = output2[0]
+        elif isinstance(output2, dict):
+            o2 = output2
+        else:
+            o2 = {}
+
         total = {}
-        if output2:
-            eval_amt  = safe_int(output2[0].get("scts_evlu_amt", 0))
-            profit    = safe_int(output2[0].get("evlu_pfls_smtl_amt", 0))
-            invested  = safe_int(output2[0].get("pchs_amt_smtl_amt", 0))
+        if o2:
+            eval_amt  = safe_int(o2.get("scts_evlu_amt", 0))
+            profit    = safe_int(o2.get("evlu_pfls_smtl_amt", 0))
+            invested  = safe_int(o2.get("pchs_amt_smtl_amt", 0))
             # evlu_erng_rt가 0이면 직접 계산
-            pct = safe_float(output2[0].get("evlu_erng_rt", 0))
+            pct = safe_float(o2.get("evlu_erng_rt", 0))
             if pct == 0 and invested:
                 pct = round(profit / invested * 100, 2)
             total = {

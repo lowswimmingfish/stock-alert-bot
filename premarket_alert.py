@@ -56,18 +56,14 @@ def get_exchange_rate():
 
 
 def get_us_stock_premarket(tickers):
-    """Get after-hours / pre-market prices for US stocks."""
+    """Get previous close prices for US stocks (real-time via fast_info)."""
     results = {}
     for ticker in tickers:
         try:
-            t = yf.Ticker(ticker)
-            info = t.fast_info
-            hist = t.history(period="5d")
-            if len(hist) >= 1:
-                last_close = hist["Close"].iloc[-1]
-                results[ticker] = {
-                    "last_close": round(last_close, 2),
-                }
+            fi = yf.Ticker(ticker).fast_info
+            last_close = fi.previous_close
+            if last_close:
+                results[ticker] = {"last_close": round(last_close, 2)}
         except Exception:
             pass
     return results

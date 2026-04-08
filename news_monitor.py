@@ -4,6 +4,7 @@
 import json
 import hashlib
 import logging
+import threading
 import requests
 import anthropic
 import yfinance as yf
@@ -222,12 +223,15 @@ def run():
              for s in config["portfolio"].get("kr_stocks", [])]
         )
 
+    seen_lock = threading.Lock()
+
     def check_stock(stock):
         ticker, name, is_kr = stock["ticker"], stock["name"], stock["is_kr"]
         news_items = fetch_kr_news(ticker, name) if is_kr else fetch_stock_news(ticker)
-        new_items = [i for i in news_items if make_key(i["title"]) not in seen]
-        for i in new_items:
-            seen.add(make_key(i["title"]))
+        with seen_lock:
+            new_items = [i for i in news_items if make_key(i["title"]) not in seen]
+            for i in new_items:
+                seen.add(make_key(i["title"]))
         if not new_items:
             return None
         logging.info(f"{name}: {len(new_items)} new articles")
@@ -251,9 +255,10 @@ def run():
     if tavily_key:
         def check_topic(topic):
             news_items = fetch_market_topic_news(topic, tavily_key)
-            new_items = [i for i in news_items if make_key(i["title"]) not in seen]
-            for i in new_items:
-                seen.add(make_key(i["title"]))
+            with seen_lock:
+                new_items = [i for i in news_items if make_key(i["title"]) not in seen]
+                for i in new_items:
+                    seen.add(make_key(i["title"]))
             if not new_items:
                 return None
             logging.info(f"Market topic [{topic['name']}]: {len(new_items)} new articles")

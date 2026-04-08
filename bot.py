@@ -928,20 +928,18 @@ def _check_market_open(is_kr: bool) -> str | None:
     import pytz
     now_kst = datetime.now(pytz.timezone("Asia/Seoul"))
     now_et  = datetime.now(pytz.timezone("America/New_York"))
-    weekday = now_kst.weekday()  # 0=월, 6=일
-
-    if weekday >= 5:
-        return "⚠️ 오늘은 주말이라 시장이 닫혀있습니다."
 
     if is_kr:
-        # 한국장 09:00~15:30 KST
-        open_h, open_m   = 9, 0
-        close_h, close_m = 15, 30
+        # 한국장: KST 기준 주말/시간 체크
+        if now_kst.weekday() >= 5:
+            return "⚠️ 오늘은 주말이라 한국 시장이 닫혀있습니다."
         t = now_kst.hour * 60 + now_kst.minute
-        if not (open_h * 60 + open_m <= t <= close_h * 60 + close_m):
+        if not (9 * 60 <= t <= 15 * 60 + 30):
             return f"⚠️ 한국장 마감 시간입니다. (개장: 09:00~15:30 KST, 현재: {now_kst.strftime('%H:%M')} KST)"
     else:
-        # 미국장 09:30~16:00 ET (EDT/EST 자동 반영)
+        # 미국장: ET 기준 주말/시간 체크 (KST 토요일 = ET 금요일 케이스 대응)
+        if now_et.weekday() >= 5:
+            return "⚠️ 오늘은 주말이라 미국 시장이 닫혀있습니다."
         t = now_et.hour * 60 + now_et.minute
         if not (9 * 60 + 30 <= t <= 16 * 60):
             return f"⚠️ 미국장 마감 시간입니다. (개장: 09:30~16:00 ET, 현재: {now_et.strftime('%H:%M')} ET)"

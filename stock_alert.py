@@ -1,13 +1,10 @@
 #!/usr/bin/env python3
 """Daily stock portfolio alert bot - sends Telegram messages with portfolio status and market overview."""
 
-import json
 import requests
 import anthropic
 import yfinance as yf
-from pykrx import stock as pykrx_stock
-from datetime import datetime, timedelta
-from pathlib import Path
+from datetime import datetime
 from config_loader import load_config
 import kis_api
 
@@ -21,55 +18,6 @@ def send_telegram(bot_token, chat_id, message):
     })
     return resp.json()
 
-
-def get_us_stock_data(tickers):
-    """Fetch current US stock prices and daily changes (real-time via fast_info)."""
-    results = {}
-    for ticker in tickers:
-        try:
-            t = yf.Ticker(ticker)
-            fi = t.fast_info
-            current = fi.last_price
-            prev_close = fi.previous_close
-            if current and prev_close:
-                change_pct = (current - prev_close) / prev_close * 100
-            else:
-                change_pct = 0
-            results[ticker] = {
-                "price": round(current or 0, 2),
-                "change_pct": round(change_pct, 2),
-            }
-        except Exception as e:
-            results[ticker] = {"price": 0, "change_pct": 0, "error": str(e)}
-    return results
-
-
-def get_kr_stock_data(tickers):
-    """Fetch current Korean stock prices and daily changes."""
-    results = {}
-    today = datetime.now()
-    # Try last 5 business days to find valid trading days
-    for ticker in tickers:
-        try:
-            end = today.strftime("%Y%m%d")
-            start = (today - timedelta(days=10)).strftime("%Y%m%d")
-            df = pykrx_stock.get_market_ohlcv(start, end, ticker)
-            if len(df) >= 2:
-                prev_close = df["종가"].iloc[-2]
-                current = df["종가"].iloc[-1]
-                change_pct = (current - prev_close) / prev_close * 100
-            elif len(df) == 1:
-                current = df["종가"].iloc[-1]
-                change_pct = 0
-            else:
-                continue
-            results[ticker] = {
-                "price": int(current),
-                "change_pct": round(change_pct, 2),
-            }
-        except Exception as e:
-            results[ticker] = {"price": 0, "change_pct": 0, "error": str(e)}
-    return results
 
 
 def get_market_indices():
