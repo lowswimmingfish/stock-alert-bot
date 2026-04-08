@@ -257,14 +257,13 @@ def build_message(config):
             lines.append(f"  {pe} US합계: ${us_total_eval:,.2f} | 손익 ${us_total_profit:+,.2f} ({pct_total:+.1f}%)")
         lines.append("")
 
-        # 전체 합산 (원화 환산)
+        # 전체 합산 (원화 환산) - yfinance 실시간 가격 기준
         kr_eval = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
         kr_profit = kr_data["total"].get("profit", 0) if kr_data["total"] else 0
-        us_eval_usd = us_data["total"].get("eval_amt", 0) if us_data["total"] else 0
-        us_profit_usd = us_data["total"].get("profit", 0) if us_data["total"] else 0
+        # us_total_eval / us_total_profit 은 위 루프에서 yfinance 가격으로 재계산된 값
         rate = fx["rate"] or 1
-        total_krw = kr_eval + us_eval_usd * rate
-        total_profit_krw = kr_profit + us_profit_usd * rate
+        total_krw = kr_eval + us_total_eval * rate
+        total_profit_krw = kr_profit + us_total_profit * rate
 
         pe = "📈" if total_profit_krw >= 0 else "📉"
         lines.append("<b>💰 Total (원화 환산)</b>")

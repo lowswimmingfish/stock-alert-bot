@@ -416,7 +416,7 @@ def get_us_balance_raw() -> dict:
             try: return float(str(v).replace(",", "") or 0)
             except: return 0.0
 
-        holdings = []
+        raw_holdings = []
         for item in output1:
             qty = safe_float(item.get("ovrs_cblc_qty", 0))
             if qty == 0:
@@ -426,7 +426,7 @@ def get_us_balance_raw() -> dict:
             profit = safe_float(item.get("frcr_evlu_pfls_amt", 0))
             invested = avg * qty
             pct = (profit / invested * 100) if invested else 0
-            holdings.append({
+            raw_holdings.append({
                 "ticker": item.get("ovrs_pdno", ""),
                 "name": item.get("ovrs_item_name", item.get("ovrs_pdno", "")),
                 "qty": qty,
@@ -437,6 +437,30 @@ def get_us_balance_raw() -> dict:
                 "eval_amt": safe_float(item.get("ovrs_stck_evlu_amt", 0)),
                 "invested": invested,
             })
+
+        # 동일 종목 합산 (NASD/NYSE/AMEX 중복 방지)
+        merged: dict = {}
+        for h in raw_holdings:
+            t = h["ticker"]
+            if t in merged:
+                e = merged[t]
+                new_qty      = e["qty"] + h["qty"]
+                new_invested = e["invested"] + h["invested"]
+                new_eval     = e["eval_amt"] + h["eval_amt"]
+                new_profit   = e["profit"] + h["profit"]
+                merged[t] = {
+                    **e,
+                    "qty":        new_qty,
+                    "invested":   new_invested,
+                    "eval_amt":   new_eval,
+                    "profit":     new_profit,
+                    "avg_price":  new_invested / new_qty if new_qty else 0,
+                    "profit_pct": round(new_profit / new_invested * 100, 2) if new_invested else 0,
+                }
+            else:
+                merged[t] = h
+        holdings = list(merged.values())
+        logger.info(f"KIS 해외잔고 합산 후 종목수: {len(holdings)}")
 
         # output2는 리스트 또는 딕셔너리로 올 수 있음
         if isinstance(output2, list) and output2:
