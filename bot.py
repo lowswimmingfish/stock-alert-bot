@@ -4,6 +4,7 @@
 import json
 import logging
 import time
+import pytz
 import requests
 import anthropic
 import yfinance as yf
@@ -15,6 +16,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from config_loader import load_config, save_config, DATA_DIR
 import kis_api
+
+KST = pytz.timezone("Asia/Seoul")
 
 LOG_PATH = Path(__file__).parent / "bot.log"
 HISTORY_PATH = DATA_DIR / "chat_history.json"
@@ -875,7 +878,7 @@ def ask_claude(question, config):
 
 {live_prices}
 
-오늘 날짜: {datetime.now().strftime('%Y-%m-%d %H:%M')}"""
+오늘 날짜: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST"""
 
     history = load_history()
     history.append({"role": "user", "content": question})
@@ -1034,6 +1037,7 @@ def handle_sell(args, config):
 def handle_portfolio(config):
     """KIS 실계좌 잔고 우선, 없으면 수동 기록 표시."""
     if kis_api.is_configured():
+        kis_api.invalidate_balance_cache()
         return kis_api.get_full_balance()
 
     lines = ["<b>현재 포트폴리오 (수동 기록)</b>", ""]

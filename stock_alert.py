@@ -3,10 +3,13 @@
 
 import requests
 import anthropic
+import pytz
 import yfinance as yf
 from datetime import datetime
 from config_loader import load_config
 import kis_api
+
+KST = pytz.timezone("Asia/Seoul")
 
 
 def send_telegram(bot_token, chat_id, message):
@@ -63,7 +66,7 @@ def get_market_summary_ai(indices, fx, config):
 
 {idx_text}
 USD/KRW: {fx['rate']} ({fx['change_pct']:+.2f}%)
-날짜: {datetime.now().strftime('%Y-%m-%d')}"""
+날짜: {datetime.now(KST).strftime('%Y-%m-%d')}"""
 
         resp = client.messages.create(
             model="claude-haiku-4-5-20251001",
@@ -104,7 +107,7 @@ def build_message(config):
     # 항상 최신 데이터 사용 (캐시 무효화)
     kis_api.invalidate_balance_cache()
 
-    now = datetime.now()
+    now = datetime.now(KST)
     indices = get_market_indices()
     fx = get_exchange_rate()
     market_summary = get_market_summary_ai(indices, fx, config)

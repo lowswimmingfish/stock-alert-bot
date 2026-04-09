@@ -5,6 +5,7 @@ import json
 import hashlib
 import logging
 import threading
+import pytz
 import requests
 import anthropic
 import yfinance as yf
@@ -13,6 +14,8 @@ from pathlib import Path
 from datetime import datetime, timedelta
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from config_loader import load_config, DATA_DIR
+
+KST = pytz.timezone("Asia/Seoul")
 
 SEEN_PATH = DATA_DIR / "seen_news.json"
 LOG_PATH = Path(__file__).parent / "news_monitor.log"
@@ -240,7 +243,7 @@ def run():
             return (
                 f"<b>종목 이슈 알림</b>\n"
                 f"종목: <b>{name}</b> ({ticker})\n"
-                f"시각: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST\n\n"
                 f"{alert}"
             )
         return None
@@ -267,7 +270,7 @@ def run():
                 return (
                     f"<b>시장 이슈 알림</b>\n"
                     f"토픽: <b>{topic['name']}</b>\n"
-                    f"시각: {datetime.now().strftime('%Y-%m-%d %H:%M')}\n\n"
+                    f"시각: {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST\n\n"
                     f"{alert}"
                 )
             return None

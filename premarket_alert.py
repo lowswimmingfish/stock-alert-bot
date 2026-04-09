@@ -1,14 +1,16 @@
 #!/usr/bin/env python3
 """Pre-market briefing - sent before US market opens with overnight news, futures, and portfolio analysis."""
 
-import json
 import requests
 import anthropic
+import pytz
 import yfinance as yf
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime
 from config_loader import load_config
 import kis_api
+
+KST = pytz.timezone("Asia/Seoul")
 
 
 def send_telegram(bot_token, chat_id, text):
@@ -130,7 +132,7 @@ def build_premarket_briefing(config):
 
     news_text = "\n".join(news_headlines[:15]) if news_headlines else "최신 뉴스 없음"
 
-    now = datetime.now()
+    now = datetime.now(KST)
     prompt = f"""지금은 {now.strftime('%Y-%m-%d %H:%M')} (한국시간)이고, 미국 증시 개장 약 1시간 전이야.
 아래 데이터를 바탕으로 오늘 미장 개장 전 브리핑을 한국어로 작성해줘.
 
@@ -174,7 +176,6 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
 
 def main():
     # 08:00~09:30 ET 범위 밖이면 스킵 (DST 자동 반영)
-    import pytz
     now_et = datetime.now(pytz.timezone("America/New_York"))
     t = now_et.hour * 60 + now_et.minute
     in_window = (8 * 60) <= t <= (9 * 60 + 30)
@@ -187,7 +188,7 @@ def main():
     # 미장 개장 전 브리핑만 전송 (리포트는 매일 8시 KST에 별도 발송)
     msg = build_premarket_briefing(config)
     send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], msg)
-    print(f"Pre-market briefing sent at {datetime.now()}")
+    print(f"Pre-market briefing sent at {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST")
 
 
 if __name__ == "__main__":

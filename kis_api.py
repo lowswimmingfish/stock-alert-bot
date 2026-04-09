@@ -217,10 +217,36 @@ def get_us_balance() -> str:
 
 
 def get_full_balance() -> str:
-    """국내 + 해외 잔고 통합 조회."""
-    kr = get_kr_balance()
-    us = get_us_balance()
-    return f"{kr}\n\n{us}"
+    """국내 + 해외 잔고 통합 조회 (FX 환산 합계 포함)."""
+    import yfinance as yf
+    kr_data = get_kr_balance_raw()
+    us_data = get_us_balance_raw()
+
+    kr_text = get_kr_balance()
+    us_text = get_us_balance()
+
+    # FX 환율
+    try:
+        rate = yf.Ticker("USDKRW=X").fast_info.last_price or 1
+    except Exception:
+        rate = 1
+
+    kr_eval   = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
+    kr_profit = kr_data["total"].get("profit", 0)   if kr_data["total"] else 0
+    us_eval   = us_data["total"].get("eval_amt", 0) if us_data["total"] else 0
+    us_profit = us_data["total"].get("profit", 0)   if us_data["total"] else 0
+
+    total_krw        = kr_eval + us_eval * rate
+    total_profit_krw = kr_profit + us_profit * rate
+    pe = "📈" if total_profit_krw >= 0 else "📉"
+
+    combined = (
+        f"\n<b>💰 Total (원화 환산)</b>\n"
+        f"  USD/KRW: {rate:,.0f}원\n"
+        f"  총 평가금: {total_krw:,.0f}원\n"
+        f"  {pe} 총 손익: {total_profit_krw:+,.0f}원"
+    )
+    return f"{kr_text}\n\n{us_text}{combined}"
 
 
 def get_kr_balance_raw() -> dict:
