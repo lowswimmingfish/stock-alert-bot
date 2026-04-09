@@ -195,35 +195,56 @@ def get_kr_balance() -> str:
 
 
 def get_us_balance() -> str:
-    """해외주식 잔고 조회 (캐시 사용)."""
+    """해외주식 잔고 조회 (yfinance 실시간 가격으로 손익 재계산)."""
+    import yfinance as yf
     try:
         data = get_us_balance_raw()
         lines = ["🇺🇸 <b>해외주식 잔고</b>"]
+        total_eval = total_profit = total_invested = 0.0
         for h in data["holdings"]:
-            sign = "📈" if h["profit"] >= 0 else "📉"
+            curr = h["curr_price"]
+            avg  = h["avg_price"]
+            qty  = h["qty"]
+            day_chg = ""
+            try:
+                fi = yf.Ticker(h["ticker"]).fast_info
+                yf_price = fi.last_price
+                yf_prev  = fi.previous_close
+                if yf_price and yf_price > 0:
+                    curr = yf_price
+                    if yf_prev:
+                        day_chg = f" ({(curr - yf_prev) / yf_prev * 100:+.2f}%)"
+            except Exception:
+                pass
+            profit   = (curr - avg) * qty
+            invested = avg * qty
+            pct      = profit / invested * 100 if invested else 0
+            total_eval     += curr * qty
+            total_profit   += profit
+            total_invested += invested
+            sign = "📈" if profit >= 0 else "📉"
             lines.append(
-                f"{sign} {h['ticker']}: {h['qty']}주 | ${h['curr_price']:.2f} | 평단 ${h['avg_price']:.2f} | "
-                f"손익 ${h['profit']:+.2f} ({h['profit_pct']:+.1f}%)"
+                f"{sign} <b>{h['ticker']}</b>: ${curr:.2f}{day_chg} | {qty:.0f}주 | 평단 ${avg:.2f} | "
+                f"손익 ${profit:+.2f} ({pct:+.1f}%)"
             )
-        if data["total"]:
-            t = data["total"]
+        if data["holdings"]:
+            pct_total = round(total_profit / total_invested * 100, 1) if total_invested else 0
+            sign = "📈" if total_profit >= 0 else "📉"
             lines.append("")
-            lines.append(f"해외 총평가: <b>${t['eval_amt']:,.2f}</b>")
-            lines.append(f"해외 손익: <b>${t['profit']:+,.2f}</b>")
-        return "\n".join(lines)
+            lines.append(f"해외 총평가: <b>${total_eval:,.2f}</b>")
+            lines.append(f"해외 손익: <b>${total_profit:+,.2f} ({pct_total:+.1f}%)</b>")
+        return "\n".join(lines), total_eval, total_profit
     except Exception as e:
         logger.error(f"KIS 해외 잔고 오류: {e}")
-        return f"해외 잔고 조회 오류: {e}"
+        return f"해외 잔고 조회 오류: {e}", 0.0, 0.0
 
 
 def get_full_balance() -> str:
     """국내 + 해외 잔고 통합 조회 (FX 환산 합계 포함)."""
     import yfinance as yf
     kr_data = get_kr_balance_raw()
-    us_data = get_us_balance_raw()
-
     kr_text = get_kr_balance()
-    us_text = get_us_balance()
+    us_text, us_total_eval, us_total_profit = get_us_balance()
 
     # FX 환율
     try:
@@ -233,11 +254,9 @@ def get_full_balance() -> str:
 
     kr_eval   = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
     kr_profit = kr_data["total"].get("profit", 0)   if kr_data["total"] else 0
-    us_eval   = us_data["total"].get("eval_amt", 0) if us_data["total"] else 0
-    us_profit = us_data["total"].get("profit", 0)   if us_data["total"] else 0
 
-    total_krw        = kr_eval + us_eval * rate
-    total_profit_krw = kr_profit + us_profit * rate
+    total_krw        = kr_eval + us_total_eval * rate
+    total_profit_krw = kr_profit + us_total_profit * rate
     pe = "📈" if total_profit_krw >= 0 else "📉"
 
     combined = (

@@ -834,7 +834,8 @@ def run_tool(tool_name: str, tool_input: dict) -> str:
         if market == "kr":
             return kis_api.get_kr_balance()
         elif market == "us":
-            return kis_api.get_us_balance()
+            text, _, _ = kis_api.get_us_balance()
+            return text
         else:
             return kis_api.get_full_balance()
     return "알 수 없는 도구입니다."
