@@ -418,26 +418,13 @@ def get_us_balance_raw() -> dict:
                 "invested": invested,
             })
 
-        # 동일 종목 합산 (NASD/NYSE/AMEX 중복 방지)
+        # 동일 종목 중복 제거 (NASD/NYSE/AMEX 각 조회에서 동일 종목이 반복 반환되는 KIS API 특성 대응)
+        # KIS API는 거래소 코드로 필터링해도 전체 보유 종목을 반환하는 경우가 있으므로
+        # 첫 번째 등장한 항목만 유지 (수량 합산 시 2배·3배로 부풀려지는 버그 방지)
         merged: dict = {}
         for h in raw_holdings:
             t = h["ticker"]
-            if t in merged:
-                e = merged[t]
-                new_qty      = e["qty"] + h["qty"]
-                new_invested = e["invested"] + h["invested"]
-                new_eval     = e["eval_amt"] + h["eval_amt"]
-                new_profit   = e["profit"] + h["profit"]
-                merged[t] = {
-                    **e,
-                    "qty":        new_qty,
-                    "invested":   new_invested,
-                    "eval_amt":   new_eval,
-                    "profit":     new_profit,
-                    "avg_price":  new_invested / new_qty if new_qty else 0,
-                    "profit_pct": round(new_profit / new_invested * 100, 2) if new_invested else 0,
-                }
-            else:
+            if t not in merged:
                 merged[t] = h
         holdings = list(merged.values())
         logger.info(f"KIS 해외잔고 합산 후 종목수: {len(holdings)}")
