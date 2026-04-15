@@ -381,9 +381,14 @@ def get_us_balance_raw() -> dict:
             )
             d = r.json()
             rt = d.get("rt_cd")
-            logger.info(f"KIS 해외잔고 {excg}: rt_cd={rt}, items={len(d.get('output1', []))}")
+            items = d.get("output1", [])
+            logger.info(f"KIS 해외잔고 {excg}: rt_cd={rt}, items={len(items)}")
             if is_success(rt):
-                all_output1.extend(d.get("output1", []))
+                for item in items:
+                    ticker = item.get("ovrs_pdno", "?")
+                    qty    = item.get("ovrs_cblc_qty", "?")
+                    print(f"[KIS RAW] {excg} | {ticker} | qty={qty}", flush=True)
+                all_output1.extend(items)
                 last_output2 = d.get("output2", [{}])
             else:
                 logger.warning(f"KIS 해외잔고 {excg} 오류: {d.get('msg1','')}")
