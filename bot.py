@@ -37,6 +37,7 @@ REPLY_KEYBOARD = {
     "keyboard": [
         ["📊 리포트", "💼 잔고"],
         ["📰 뉴스브리핑", "📈 시장현황"],
+        ["📉 성과차트", "🔔 알림목록"],
         ["❓ 도움말"],
     ],
     "resize_keyboard": True,
@@ -796,6 +797,39 @@ TOOLS = [
             "required": [],
         },
     },
+    {
+        "name": "add_price_alert",
+        "description": (
+            "가격 알림 등록. 사용자가 '~이면 알려줘' 식으로 말할 때 사용. "
+            "예: 'NTR $80 넘으면 알려줘' → ticker=NTR, condition=above, price=80"
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ticker":    {"type": "string", "description": "미국 주식 티커 (예: NTR, AAPL)"},
+                "condition": {"type": "string", "enum": ["above", "below"],
+                              "description": "above=이상/초과, below=이하/미만"},
+                "price":     {"type": "number", "description": "기준 가격 (USD)"},
+            },
+            "required": ["ticker", "condition", "price"],
+        },
+    },
+    {
+        "name": "list_alerts",
+        "description": "등록된 가격 알림 목록과 자동 이벤트 알림 설정을 보여줌.",
+        "input_schema": {"type": "object", "properties": {}, "required": []},
+    },
+    {
+        "name": "remove_alert",
+        "description": "특정 번호의 가격 알림 삭제.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "alert_id": {"type": "integer", "description": "삭제할 알림 번호"},
+            },
+            "required": ["alert_id"],
+        },
+    },
 ]
 
 
@@ -838,6 +872,19 @@ def run_tool(tool_name: str, tool_input: dict) -> str:
             return text
         else:
             return kis_api.get_full_balance()
+    elif tool_name == "add_price_alert":
+        from alert_manager import add_price_alert
+        return add_price_alert(
+            tool_input["ticker"],
+            tool_input["condition"],
+            float(tool_input["price"]),
+        )
+    elif tool_name == "list_alerts":
+        from alert_manager import list_alerts
+        return list_alerts()
+    elif tool_name == "remove_alert":
+        from alert_manager import remove_alert
+        return remove_alert(int(tool_input["alert_id"]))
     return "알 수 없는 도구입니다."
 
 
@@ -1089,6 +1136,8 @@ _BUTTON_MAP = {
     "💼 잔고":      "/portfolio",
     "📰 뉴스브리핑": "__premarket__",
     "📈 시장현황":   "__macro__",
+    "📉 성과차트":  "__performance__",
+    "🔔 알림목록":  "__alerts__",
     "❓ 도움말":    "/help",
 }
 
@@ -1109,6 +1158,15 @@ def process_update(update, config):
         return build_premarket_briefing(config)
     if text == "__macro__":
         return get_macro_data()
+    if text == "__performance__":
+        from portfolio_tracker import send_chart_telegram, get_performance_summary
+        bot_token = config["telegram"]["bot_token"]
+        chat_id   = config["telegram"]["chat_id"]
+        send_chart_telegram(bot_token, chat_id, days=30)
+        return get_performance_summary(days=30)
+    if text == "__alerts__":
+        from alert_manager import list_alerts
+        return list_alerts()
 
     # Command handling
     if text.startswith("/"):
