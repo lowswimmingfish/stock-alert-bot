@@ -133,8 +133,21 @@ def build_premarket_briefing(config):
     news_text = "\n".join(news_headlines[:15]) if news_headlines else "최신 뉴스 없음"
 
     now = datetime.now(KST)
-    prompt = f"""지금은 {now.strftime('%Y-%m-%d %H:%M')} (한국시간)이고, 미국 증시 개장 약 1시간 전이야.
-아래 데이터를 바탕으로 오늘 미장 개장 전 브리핑을 한국어로 작성해줘.
+    now_et = datetime.now(pytz.timezone("America/New_York"))
+
+    # 미국 장 개장(09:30 ET)까지 남은 시간 계산
+    market_open_et = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+    delta = market_open_et - now_et
+    total_min = int(delta.total_seconds() / 60)
+    if total_min > 0:
+        time_to_open = f"개장까지 약 {total_min // 60}시간 {total_min % 60}분" if total_min >= 60 else f"개장까지 약 {total_min}분"
+    elif total_min > -390:  # 390분(6.5시간) = 장중
+        time_to_open = f"장 진행 중 (개장 후 {-total_min // 60}시간 {-total_min % 60}분)"
+    else:
+        time_to_open = "장 마감"
+
+    prompt = f"""지금은 {now.strftime('%Y-%m-%d %H:%M')} (한국시간, 미국 ET {now_et.strftime('%H:%M')})이고, {time_to_open}이야.
+아래 데이터를 바탕으로 미장 브리핑을 한국어로 작성해줘.
 
 [선물 / 매크로]
 {futures_text}
@@ -166,8 +179,8 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
     briefing = resp.content[0].text
 
     header = (
-        f"<b>미장 개장 전 브리핑</b>\n"
-        f"{now.strftime('%Y-%m-%d %H:%M')} | 개장까지 약 1시간\n"
+        f"<b>미장 브리핑</b>\n"
+        f"{now.strftime('%Y-%m-%d %H:%M')} KST | ET {now_et.strftime('%H:%M')} | {time_to_open}\n"
         f"━━━━━━━━━━━━━━━━━━\n\n"
     )
 
