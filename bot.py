@@ -37,8 +37,9 @@ REPLY_KEYBOARD = {
     "keyboard": [
         ["📊 리포트", "💼 잔고"],
         ["📰 뉴스브리핑", "📈 시장현황"],
-        ["📉 성과차트", "🔔 알림목록"],
-        ["❓ 도움말"],
+        ["📉 성과차트", "🏆 기여도"],
+        ["📐 CAPM 분석", "🔻 MDD"],
+        ["🔔 알림목록", "❓ 도움말"],
     ],
     "resize_keyboard": True,
     "persistent": True,
@@ -1137,6 +1138,9 @@ _BUTTON_MAP = {
     "📰 뉴스브리핑": "__premarket__",
     "📈 시장현황":   "__macro__",
     "📉 성과차트":  "__performance__",
+    "🏆 기여도":    "/contrib",
+    "📐 CAPM 분석": "/capm",
+    "🔻 MDD":       "/mdd",
     "🔔 알림목록":  "__alerts__",
     "❓ 도움말":    "/help",
 }
@@ -1185,6 +1189,88 @@ def process_update(update, config):
             kis_api.invalidate_balance_cache()
             _save_price_cache("")
             response = build_message(config)
+        elif command == "/mdd":
+            from portfolio_tracker import calc_mdd
+            days_arg = 365
+            if args:
+                try:
+                    days_arg = int(args[0])
+                except ValueError:
+                    pass
+            mdd = calc_mdd(days=days_arg)
+            if not mdd:
+                response = "📉 MDD 계산에 필요한 데이터가 부족해요. (최소 2일치 스냅샷 필요)"
+            else:
+                mdd_em = "🔴" if mdd["mdd_pct"] > 20 else ("🟡" if mdd["mdd_pct"] > 10 else "🟢")
+                rec = mdd["recovery_pct"]
+                rec_em = "✅" if rec >= 100 else ("🔄" if rec > 0 else "⏳")
+                response = (
+                    f"📉 <b>최대낙폭 분석 (최근 {days_arg}일)</b>\n\n"
+                    f"{mdd_em} <b>MDD: -{mdd['mdd_pct']:.2f}%</b>\n\n"
+                    f"📈 고점: {mdd['peak_date']}\n"
+                    f"   {mdd['peak_val']/1e4:,.0f}만원\n\n"
+                    f"📉 저점: {mdd['trough_date']}\n"
+                    f"   {mdd['trough_val']/1e4:,.0f}만원\n\n"
+                    f"💰 현재: {mdd['curr_val']/1e4:,.0f}만원\n\n"
+                    f"{rec_em} 낙폭 회복률: <b>{rec:.0f}%</b>\n"
+                    f"<i>/mdd 90  →  90일 기준으로 분석</i>"
+                )
+        elif command == "/contrib":
+            from portfolio_tracker import calc_stock_contribution
+            days_arg = 30
+            if args:
+                try:
+                    days_arg = int(args[0])
+                except ValueError:
+                    pass
+            contribs = calc_stock_contribution(days=days_arg)
+            if not contribs:
+                response = "🏆 종목별 기여도 계산에 필요한 데이터가 부족해요."
+            else:
+                lines = [f"🏆 <b>종목별 기여도 (최근 {days_arg}일)</b>\n"]
+                for c in contribs:
+                    sign = "+" if c["contrib_pct"] >= 0 else ""
+                    em   = "📈" if c["contrib_pct"] >= 0 else "📉"
+                    lines.append(
+                        f"{em} <b>{c['ticker']}</b>\n"
+                        f"   기여도: {sign}{c['contrib_pct']:.2f}%p\n"
+                        f"   수익률: {c['ret_pct']:+.1f}%  |  비중: {c['weight_pct']:.0f}%  |  평가: {c['val_end_만']:,.0f}만원"
+                    )
+                lines.append(f"\n<i>/contrib 60  →  60일 기준으로 분석</i>")
+                response = "\n".join(lines)
+        elif command == "/capm":
+            from portfolio_tracker import calc_capm_metrics
+            days_arg = 90
+            if args:
+                try:
+                    days_arg = int(args[0])
+                except ValueError:
+                    pass
+            capm = calc_capm_metrics(days=days_arg)
+            if not capm:
+                response = "📐 CAPM 분석에 필요한 데이터가 부족해요. (최소 10일치 스냅샷 필요)"
+            else:
+                alpha_sign = "+" if capm["alpha_pct"] >= 0 else ""
+                alpha_em   = "✅" if capm["alpha_pct"] >= 0 else "⚠️"
+                beta_em    = "🔴" if capm["beta"] > 1.2 else ("🟡" if capm["beta"] > 0.8 else "🟢")
+                sharpe_em  = "✅" if capm["sharpe"] > 1 else ("🟡" if capm["sharpe"] > 0 else "⚠️")
+                response = (
+                    f"📐 <b>CAPM 포트폴리오 분석</b> (최근 {capm['n_days']}거래일)\n\n"
+                    f"{beta_em} <b>베타(β)</b>: {capm['beta']:.3f}\n"
+                    f"  시장보다 {'더 민감' if capm['beta'] > 1 else '덜 민감'}하게 움직임\n\n"
+                    f"<b>수익률 비교</b>\n"
+                    f"  무위험이자율(Rf):   {capm['rf_pct']:.1f}%\n"
+                    f"  시장수익률(S&P500): {capm['mkt_pct']:+.1f}%\n"
+                    f"  CAPM 기대수익률:   {capm['expected_pct']:+.1f}%\n"
+                    f"  실제 수익률:       {capm['actual_pct']:+.1f}%\n\n"
+                    f"{alpha_em} <b>알파(α)</b>: {alpha_sign}{capm['alpha_pct']:.2f}%\n"
+                    f"  {'시장 대비 초과수익 달성 중 🎉' if capm['alpha_pct'] >= 0 else '시장 기대치 하회 중'}\n\n"
+                    f"{sharpe_em} <b>샤프 비율</b>: {capm['sharpe']:.3f}\n"
+                    f"  (위험 1단위당 초과수익, 1 이상이면 우수)\n\n"
+                    f"📊 <b>트레이너 비율</b>: {capm['treynor_pct']:.2f}%\n"
+                    f"  (베타 1단위당 초과수익)\n\n"
+                    f"<i>/capm 30  →  30일 기준으로 분석</i>"
+                )
         elif command == "/reset":
             response = handle_reset()
         elif command in ("/help", "/start"):

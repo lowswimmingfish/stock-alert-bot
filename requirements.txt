@@ -9,3 +9,4 @@ apscheduler
 pytz
 matplotlib
 pandas
+numpy
