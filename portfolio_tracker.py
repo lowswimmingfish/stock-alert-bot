@@ -54,6 +54,27 @@ def _save_snapshots(data: dict):
     _snap_cache_ts = time.time()
 
 
+# ── 매입 원가 계산 헬퍼 ──────────────────────────────────────────────────────
+
+def _cost_krw(snap: dict) -> float:
+    """스냅샷에서 매입 원가 총액(KRW 환산)을 계산.
+    US 주식: avg_price(USD) × qty × fx_rate
+    KR 주식: avg_price(KRW) × qty
+    """
+    fx = snap.get("fx_rate", 1400)
+    cost = 0.0
+    for h in snap.get("holdings", {}).values():
+        qty = h.get("qty", 0)
+        avg = h.get("avg_price", 0)
+        if avg <= 0 or qty <= 0:
+            continue
+        if "value_usd" in h:   # 미국 주식
+            cost += avg * qty * fx
+        else:                   # 국내 주식
+            cost += avg * qty
+    return cost
+
+
 # ── 스냅샷 촬영 ───────────────────────────────────────────────────────────────
 
 def take_snapshot() -> dict:
@@ -620,36 +641,38 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
 
     dates  = [d for d, _ in filtered]
     values = [v["total_krw"] for _, v in filtered]
-    base   = values[0]
-    pct_returns = [(v / base - 1) * 100 for v in values]
 
-    # S&P500 비교
+    # ── 매입가 기준 수익률 (추가 매수 왜곡 없음) ──
+    costs = [_cost_krw(snap) for _, snap in filtered]
+    pct_returns = [
+        (v / c - 1) * 100 if c > 0 else 0.0
+        for v, c in zip(values, costs)
+    ]
+
+    # S&P500 비교 — 포트폴리오 첫날 수익률에 맞춰 앵커
     sp = _sp500_returns(dates[0], dates[-1])
     sp_dates  = sorted([date.fromisoformat(d) for d in sp if start <= date.fromisoformat(d) <= today])
     sp_values = [sp[str(d)] for d in sp_dates if str(d) in sp]
+    sp_offset = pct_returns[0] if pct_returns else 0.0
+    sp_values = [v + sp_offset for v in sp_values]
 
-    # CAPM 기대수익률 선 (일별 누적)
+    # CAPM 기대수익률 선 — 동일하게 앵커
     capm = calc_capm_metrics(days=max(days, 30))
     capm_dates, capm_values = [], []
-    if capm and capm["beta"] and sp_dates and sp_values:
+    if capm and capm["beta"] and sp_dates:
         try:
-            rf_annual  = capm["rf_pct"] / 100
-            beta       = capm["beta"]
-            # 기대수익률: rf + beta*(sp_return - rf), sp 누적 수익률로 스케일
-            rf_daily   = rf_annual / 252
+            rf_annual = capm["rf_pct"] / 100
+            beta      = capm["beta"]
+            rf_daily  = rf_annual / 252
             capm_dates = sp_dates
-            capm_values = []
-            for sp_pct in sp_values:
-                sp_daily_ret = sp_pct / 100  # 시작일 대비 누적
-                capm_cum = rf_daily * len(capm_dates) + beta * (sp_daily_ret - rf_daily * len(capm_dates))
-                capm_values.append(capm_cum * 100)
-            # 더 직관적: β×S&P500_누적 + (1-β)×rf_누적
             capm_values = []
             for i, sp_pct in enumerate(sp_values):
                 n = i + 1
-                rf_cum = ((1 + rf_daily) ** n - 1) * 100
-                capm_cum = rf_cum + beta * (sp_pct - rf_cum)
-                capm_values.append(capm_cum)
+                rf_cum   = ((1 + rf_daily) ** n - 1) * 100
+                # sp_pct는 이미 offset 포함이므로 원래 sp 수익률로 복원
+                sp_raw   = sp_pct - sp_offset
+                capm_cum = rf_cum + beta * (sp_raw - rf_cum)
+                capm_values.append(capm_cum + sp_offset)
         except Exception:
             capm_dates, capm_values = [], []
 
@@ -699,10 +722,10 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
             pass
 
     ax1.axhline(0, color="#555555", linewidth=0.8)
-    ax1.set_ylabel("수익률 (%)", color="#aaaaaa", fontsize=10)
+    ax1.set_ylabel("수익률 % (매입가 기준)", color="#aaaaaa", fontsize=10)
     ax1.legend(facecolor="#1a1a2e", labelcolor="white", fontsize=9,
                framealpha=0.8, loc="upper left")
-    ax1.set_title(f"포트폴리오 성과 (최근 {days}일)", color="white", fontsize=13, pad=12)
+    ax1.set_title(f"포트폴리오 성과 (최근 {days}일 | 매입가 기준)", color="white", fontsize=13, pad=12)
 
     # CAPM + MDD 요약 텍스트 박스
     info_lines = []
@@ -727,10 +750,10 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}만"))
     ax2.set_ylabel("평가금액", color="#aaaaaa", fontsize=10)
 
-    # 수익 요약 텍스트
-    total_pct = pct_returns[-1]
-    total_gain = values[-1] - values[0]
-    color_txt = "#00d4aa" if total_pct >= 0 else "#ff5555"
+    # 수익 요약 텍스트 (매입가 기준 현재 수익률)
+    total_pct  = pct_returns[-1]
+    total_gain = values[-1] - costs[-1]   # 미실현 손익 (현재 평가금 - 매입 원가)
+    color_txt  = "#00d4aa" if total_pct >= 0 else "#ff5555"
     sign = "+" if total_pct >= 0 else ""
     fig.text(
         0.99, 0.97,
@@ -790,19 +813,27 @@ def get_performance_summary(days: int = 30) -> str:
     first_d, first_v = filtered[0]
     last_d,  last_v  = filtered[-1]
 
-    base = first_v["total_krw"]
     curr = last_v["total_krw"]
-    pct  = (curr / base - 1) * 100
-    gain = curr - base
+    cost = _cost_krw(last_v)              # 현재 보유분 매입 원가 (KRW)
+    pct  = (curr / cost - 1) * 100 if cost > 0 else 0.0
+    gain = curr - cost                    # 미실현 손익
     sign  = "+" if pct >= 0 else ""
     arrow = "📈" if pct >= 0 else "📉"
 
+    # 기간 내 변화 (보조 지표)
+    cost_first = _cost_krw(first_v)
+    base_first = first_v["total_krw"]
+    pct_first  = (base_first / cost_first - 1) * 100 if cost_first > 0 else 0.0
+    period_chg = pct - pct_first         # 기간 동안 수익률 변화폭
+    period_sign = "+" if period_chg >= 0 else ""
+
     lines = [
-        f"{arrow} <b>포트폴리오 성과 (최근 {days}일)</b>",
-        f"{first_d} → {last_d}",
-        f"수익률: <b>{sign}{pct:.2f}%</b>",
-        f"손익:   <b>{sign}{gain / 1e4:,.1f}만원</b>",
+        f"{arrow} <b>포트폴리오 성과 (매입가 기준)</b>",
+        f"기간: {first_d} → {last_d}",
+        f"수익률: <b>{sign}{pct:.2f}%</b>  <i>(기간 중 {period_sign}{period_chg:.2f}%p 변화)</i>",
+        f"평가손익: <b>{sign}{gain / 1e4:,.1f}만원</b>",
         f"현재 평가금: {curr / 1e4:,.0f}만원",
+        f"매입 원가:   {cost / 1e4:,.0f}만원",
         "",
     ]
 
