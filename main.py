@@ -42,8 +42,11 @@ def run_news_monitor():
 
 
 def run_snapshot():
-    """매일 장 마감 후 포트폴리오 스냅샷 저장."""
+    """매일 장 마감 후 포트폴리오 스냅샷 저장 (주말 스킵)."""
     try:
+        import datetime as dt
+        if dt.datetime.now(ET).weekday() >= 5:  # 토(5)/일(6) — 시장 휴장
+            return
         from portfolio_tracker import take_snapshot
         snap = take_snapshot()
         logger.info(f"Snapshot OK: {snap['total_krw']:,.0f} KRW")
@@ -54,12 +57,12 @@ def run_snapshot():
 def run_price_alerts():
     """가격 알림 체크 (미국장 시간 중 5분마다)."""
     try:
-        now_et = time.gmtime()  # UTC
-        # ET = UTC-4(EDT) or UTC-5(EST). 간단히 UTC 13:30~20:00 = ET 09:30~16:00
         import datetime as dt
-        now_utc = dt.datetime.utcnow()
-        h, m = now_utc.hour, now_utc.minute
-        in_market = (13 * 60 + 30) <= (h * 60 + m) <= (20 * 60)
+        now_et = dt.datetime.now(ET)
+        if now_et.weekday() >= 5:  # 주말 스킵
+            return
+        t = now_et.hour * 60 + now_et.minute
+        in_market = (9 * 60 + 30) <= t <= (16 * 60)
         if not in_market:
             return
 
@@ -124,21 +127,47 @@ def run_event_alerts():
         logger.error(f"Event alert error: {e}")
 
 
+def run_analyst_alerts():
+    try:
+        from tavily_alerts import run_analyst_alerts as _fn
+        _fn()
+    except Exception as e:
+        logger.error(f"Analyst alert error: {e}")
+
+
+def run_earnings_consensus():
+    try:
+        from tavily_alerts import run_earnings_consensus as _fn
+        _fn()
+    except Exception as e:
+        logger.error(f"Earnings consensus error: {e}")
+
+
+def run_weekly_analysis():
+    try:
+        from tavily_alerts import run_weekly_deep_analysis as _fn
+        _fn()
+    except Exception as e:
+        logger.error(f"Weekly analysis error: {e}")
+
+
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=KST)
 
-    # 매일 오전 8시 (KST)
+    # 매일 오전 8시 (KST) — misfire_grace_time=300: 재시작 후 5분 이내에만 실행, coalesce=True: 중복 실행 방지
     scheduler.add_job(
         run_daily_report,
         CronTrigger(hour=8, minute=0, timezone=KST),
         id="daily_report",
         name="Daily Portfolio Report",
+        misfire_grace_time=60,   # 재시작 후 1분 이내에만 실행 (300→60으로 단축)
+        coalesce=True,
     )
 
-    # 미국장 개장(09:30 ET) 1시간 전 = 08:30 ET (EDT/EST 자동 반영)
+    # 미국장 개장(09:30 ET) 1시간 전 = 08:30 ET, 평일만 (EDT/EST 자동 반영)
     scheduler.add_job(
         run_premarket,
-        CronTrigger(hour=8, minute=30, timezone=ET),
+        CronTrigger(hour=8, minute=30, day_of_week="mon-fri", timezone=ET),
         id="premarket",
         name="Pre-market Briefing",
     )
@@ -177,6 +206,30 @@ def start_scheduler():
         name="Event Alert Check",
     )
 
+    # 매일 09:30 KST 애널리스트 레이팅 변경 알림
+    scheduler.add_job(
+        run_analyst_alerts,
+        CronTrigger(hour=9, minute=30, timezone=KST),
+        id="analyst_alerts",
+        name="Analyst Rating Alerts",
+    )
+
+    # 매일 19:00 KST 실적 발표 전날 컨센서스 브리핑
+    scheduler.add_job(
+        run_earnings_consensus,
+        CronTrigger(hour=19, minute=0, timezone=KST),
+        id="earnings_consensus",
+        name="Earnings Consensus Briefing",
+    )
+
+    # 일요일 20:00 KST 주간 포트폴리오 심층 분석
+    scheduler.add_job(
+        run_weekly_analysis,
+        CronTrigger(hour=20, minute=0, day_of_week="sun", timezone=KST),
+        id="weekly_analysis",
+        name="Weekly Deep Analysis",
+    )
+
     scheduler.start()
     logger.info("Scheduler started (KST timezone)")
     return scheduler
@@ -184,6 +237,33 @@ def start_scheduler():
 
 if __name__ == "__main__":
     logger.info("Starting stock alert bot...")
+
+    # 스냅샷 데이터 소급 생성 (CAPM 등 분석을 위해 90일치 backfill)
+    try:
+        from portfolio_tracker import backfill_snapshots, _load_snapshots
+        from datetime import date, timedelta
+        data = _load_snapshots()
+        # 거래일(평일) 스냅샷만 카운트
+        trading_days = sum(
+            1 for d in data
+            if date.fromisoformat(d).weekday() < 5
+        )
+        if trading_days < 10:
+            added = backfill_snapshots(days=90)
+            logger.info(f"Backfill: {added}일 소급 생성 (기존 거래일 {trading_days}일)")
+        else:
+            logger.info(f"Backfill 스킵: 기존 거래일 {trading_days}일치 충분")
+    except Exception as e:
+        logger.error(f"Backfill error: {e}")
+
+    # 이상값 스냅샷 정리 (주말 장 휴장 시 가격 0 저장 문제 등)
+    try:
+        from portfolio_tracker import clean_anomalous_snapshots
+        removed = clean_anomalous_snapshots()
+        if removed:
+            logger.info(f"Anomalous snapshots removed: {removed}개")
+    except Exception as e:
+        logger.error(f"Snapshot cleanup error: {e}")
 
     # 시작하자마자 뉴스 1회 실행
     run_news_monitor()

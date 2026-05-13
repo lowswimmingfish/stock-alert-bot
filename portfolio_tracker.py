@@ -4,6 +4,7 @@
 import io
 import json
 import logging
+import time
 import requests
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -25,18 +26,32 @@ KST = pytz.timezone("Asia/Seoul")
 SNAPSHOTS_FILE = DATA_DIR / "snapshots.json"
 
 
-# ── 스냅샷 저장/로드 ───────────────────────────────────────────────────────────
+# ── 스냅샷 저장/로드 (30초 인메모리 캐시 — 같은 요청 내 4~5번 중복 파일 I/O 방지) ──────
+
+_snap_cache: dict | None = None
+_snap_cache_ts: float = 0.0
+_SNAP_CACHE_TTL = 30  # seconds
+
 
 def _load_snapshots() -> dict:
+    global _snap_cache, _snap_cache_ts
+    if _snap_cache is not None and (time.time() - _snap_cache_ts) < _SNAP_CACHE_TTL:
+        return _snap_cache
     if SNAPSHOTS_FILE.exists():
         with open(SNAPSHOTS_FILE) as f:
-            return json.load(f)
-    return {}
+            _snap_cache = json.load(f)
+    else:
+        _snap_cache = {}
+    _snap_cache_ts = time.time()
+    return _snap_cache
 
 
 def _save_snapshots(data: dict):
+    global _snap_cache, _snap_cache_ts
     with open(SNAPSHOTS_FILE, "w") as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
+    _snap_cache = data
+    _snap_cache_ts = time.time()
 
 
 # ── 스냅샷 촬영 ───────────────────────────────────────────────────────────────
@@ -116,10 +131,179 @@ def take_snapshot() -> dict:
         "fx_rate":   round(fx_rate, 2),
         "holdings":  holdings,
     }
+
+    # ── 이상값 방어: 직전 스냅샷 대비 40% 이상 급락이면 저장 안 함 ──
+    prev_snaps = sorted(data.items(), key=lambda x: x[0])
+    if prev_snaps:
+        prev_total = prev_snaps[-1][1].get("total_krw", 0)
+        if prev_total > 0 and total_krw < prev_total * 0.6:
+            logger.warning(
+                f"Snapshot anomaly: {today} total_krw={total_krw:,.0f} "
+                f"vs prev {prev_total:,.0f} ({total_krw/prev_total*100:.1f}%) — skipping save"
+            )
+            return snapshot  # 반환은 하되 저장 안 함
+
     data[today] = snapshot
     _save_snapshots(data)
     logger.info(f"Snapshot saved: {today} | {total_krw:,.0f} KRW")
     return snapshot
+
+
+# ── 스냅샷 소급 생성 (backfill) ───────────────────────────────────────────────
+
+def backfill_snapshots(days: int = 90) -> int:
+    """
+    현재 보유 종목의 yfinance 과거 가격으로 스냅샷을 소급 생성.
+    이미 데이터가 있는 날짜는 덮어쓰지 않음.
+    반환: 새로 생성된 날짜 수
+    """
+    data = _load_snapshots()
+
+    # 보유 종목 가져오기
+    us_holdings, kr_holdings = [], []
+    if kis_api.is_configured():
+        try:
+            us_raw = kis_api.get_us_balance_raw()
+            us_holdings = us_raw.get("holdings", [])
+        except Exception as e:
+            logger.warning(f"Backfill KIS US error: {e}")
+        try:
+            kr_raw = kis_api.get_kr_balance_raw()
+            kr_holdings = kr_raw.get("holdings", [])
+        except Exception as e:
+            logger.warning(f"Backfill KIS KR error: {e}")
+
+    if not us_holdings and not kr_holdings:
+        logger.warning("Backfill: 보유 종목 없음")
+        return 0
+
+    today = date.today()
+    start = today - timedelta(days=days)
+
+    # 환율 히스토리
+    fx_hist = {}
+    try:
+        fx_df = yf.Ticker("USDKRW=X").history(period=f"{days + 10}d")
+        for idx, row in fx_df.iterrows():
+            d = idx.date() if hasattr(idx, "date") else idx
+            fx_hist[d] = row["Close"]
+    except Exception as e:
+        logger.warning(f"Backfill FX error: {e}")
+
+    # 미국 종목 가격 히스토리
+    us_price_hist: dict[str, dict] = {}
+    for h in us_holdings:
+        ticker = h["ticker"]
+        try:
+            df = yf.Ticker(ticker).history(period=f"{days + 10}d")
+            us_price_hist[ticker] = {}
+            for idx, row in df.iterrows():
+                d = idx.date() if hasattr(idx, "date") else idx
+                us_price_hist[ticker][d] = row["Close"]
+        except Exception as e:
+            logger.warning(f"Backfill {ticker} error: {e}")
+
+    # 날짜별 스냅샷 생성
+    added = 0
+    current = start
+    while current <= today:
+        date_str = str(current)
+        # 주말 스킵 (S&P500 거래일 기준에 맞추기 위해)
+        if current.weekday() >= 5:
+            current += timedelta(days=1)
+            continue
+        if date_str in data:
+            current += timedelta(days=1)
+            continue
+
+        fx = fx_hist.get(current) or fx_hist.get(current - timedelta(days=1)) or fx_hist.get(current - timedelta(days=2)) or 1400.0
+
+        total_usd = 0.0
+        kr_krw = 0.0
+        holdings = {}
+
+        for h in us_holdings:
+            ticker = h["ticker"]
+            hist = us_price_hist.get(ticker, {})
+            price = hist.get(current) or hist.get(current - timedelta(days=1)) or hist.get(current - timedelta(days=2))
+            if price is None:
+                continue
+            value = price * h["qty"]
+            total_usd += value
+            holdings[ticker] = {
+                "qty": h["qty"],
+                "price": round(price, 4),
+                "avg_price": h["avg_price"],
+                "value_usd": round(value, 2),
+            }
+
+        for h in kr_holdings:
+            val = h.get("eval_amt", 0)
+            kr_krw += val
+            holdings[h["ticker"]] = {
+                "qty": h["qty"],
+                "price": h["curr_price"],
+                "avg_price": h["avg_price"],
+                "value_krw": val,
+            }
+
+        total_krw = round(total_usd * fx + kr_krw)
+        if total_krw == 0:
+            current += timedelta(days=1)
+            continue
+
+        data[date_str] = {
+            "total_krw": total_krw,
+            "total_usd": round(total_usd, 2),
+            "kr_krw": round(kr_krw),
+            "fx_rate": round(fx, 2),
+            "holdings": holdings,
+            "backfilled": True,
+        }
+        added += 1
+        current += timedelta(days=1)
+
+    if added > 0:
+        _save_snapshots(data)
+        logger.info(f"Backfill 완료: {added}일 소급 생성")
+    return added
+
+
+# ── 이상값 스냅샷 정리 ───────────────────────────────────────────────────────
+
+def clean_anomalous_snapshots(threshold: float = 0.6) -> int:
+    """
+    직전/다음 스냅샷 대비 모두 40% 이상 낮은 이상값 항목을 제거.
+    (주말 장 휴장 시 가격 0 저장 문제 등 대응)
+    반환: 제거된 항목 수
+    """
+    data = _load_snapshots()
+    if len(data) < 3:
+        return 0
+
+    sorted_items = sorted(data.items(), key=lambda x: x[0])
+    to_remove = []
+
+    for i in range(1, len(sorted_items) - 1):
+        date_str, snap = sorted_items[i]
+        prev_total = sorted_items[i - 1][1].get("total_krw", 0)
+        next_total = sorted_items[i + 1][1].get("total_krw", 0)
+        curr_total = snap.get("total_krw", 0)
+        if (prev_total > 0 and next_total > 0
+                and curr_total < prev_total * threshold
+                and curr_total < next_total * threshold):
+            to_remove.append(date_str)
+            logger.info(
+                f"Removing anomalous snapshot: {date_str} "
+                f"({curr_total:,.0f} KRW | prev={prev_total:,.0f} next={next_total:,.0f})"
+            )
+
+    if to_remove:
+        for d in to_remove:
+            del data[d]
+        _save_snapshots(data)
+
+    return len(to_remove)
 
 
 # ── S&P500 비교 데이터 ────────────────────────────────────────────────────────
@@ -246,7 +430,8 @@ def calc_stock_contribution(days: int = 30) -> list[dict]:
     last_holdings  = last_snap.get("holdings", {})
 
     results = []
-    all_tickers = set(first_holdings) | set(last_holdings)
+    # 현재 보유 중인 종목만 계산 (매도 종목은 total_krw 변화에 이미 반영됨)
+    all_tickers = set(last_holdings)
 
     for ticker in all_tickers:
         f = first_holdings.get(ticker, {})
@@ -301,7 +486,7 @@ def calc_capm_metrics(days: int = 90) -> dict:
     - actual_return: 실제 연율화 수익률
     """
     data = _load_snapshots()
-    if len(data) < 10:
+    if len(data) < 7:
         return {}
 
     today = date.today()
@@ -312,7 +497,7 @@ def calc_capm_metrics(days: int = 90) -> dict:
          if start <= date.fromisoformat(d) <= today],
         key=lambda x: x[0],
     )
-    if len(filtered) < 10:
+    if len(filtered) < 7:
         return {}
 
     dates  = [d for d, _ in filtered]
@@ -343,7 +528,7 @@ def calc_capm_metrics(days: int = 90) -> dict:
 
         # None이 너무 많으면 포기
         valid = [(p, m) for p, m in zip(port_ret, sp_ret_list) if m is not None]
-        if len(valid) < 10:
+        if len(valid) < 7:
             return {}
 
         port_r = np.array([v[0] for v in valid])
@@ -516,10 +701,15 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
                  color="#cccccc", fontsize=8, ha="right", va="bottom",
                  bbox=dict(facecolor="#1a1a2e", alpha=0.7, edgecolor="#444444", boxstyle="round,pad=0.4"))
 
-    # 하단: 절대 평가금액 (백만원)
-    ax2.plot(dates, [v / 1e6 for v in values], color="#00a8ff", linewidth=2)
-    ax2.fill_between(dates, [v / 1e6 for v in values], alpha=0.12, color="#00a8ff")
-    ax2.set_ylabel("평가금액 (백만원)", color="#aaaaaa", fontsize=10)
+    # 하단: 절대 평가금액 (만원), y축은 데이터 범위에 맞게 zoom
+    vals_만 = [v / 1e4 for v in values]
+    ax2.plot(dates, vals_만, color="#00a8ff", linewidth=2)
+    _min, _max = min(vals_만), max(vals_만)
+    _margin = (_max - _min) * 0.25 or _max * 0.01
+    ax2.set_ylim(_min - _margin, _max + _margin)
+    ax2.fill_between(dates, vals_만, _min - _margin, alpha=0.12, color="#00a8ff")
+    ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}만"))
+    ax2.set_ylabel("평가금액", color="#aaaaaa", fontsize=10)
 
     # 수익 요약 텍스트
     total_pct = pct_returns[-1]
@@ -651,11 +841,62 @@ def get_performance_summary(days: int = 30) -> str:
     if capm:
         lines.append("")
         lines.append("<b>📐 CAPM 분석</b>")
-        beta_em = "🔴" if capm["beta"] > 1.2 else ("🟡" if capm["beta"] > 0.8 else "🟢")
-        alpha_sign = "+" if capm["alpha_pct"] >= 0 else ""
-        alpha_em = "✅" if capm["alpha_pct"] >= 0 else "⚠️"
-        lines.append(f"  베타(β):    {beta_em} <b>{capm['beta']:.3f}</b>")
-        lines.append(f"  알파(α):    {alpha_em} <b>{alpha_sign}{capm['alpha_pct']:.2f}%</b>")
-        lines.append(f"  샤프 비율: <b>{capm['sharpe']:.3f}</b>")
+
+        # ── 베타 ──
+        b = capm["beta"]
+        beta_em = "🔴" if b > 1.2 else ("🟡" if b > 0.8 else "🟢")
+        if b > 1.5:
+            beta_desc = f"시장 변동의 {b:.1f}배 → 매우 공격적"
+        elif b > 1.2:
+            beta_desc = f"시장 변동의 {b:.1f}배 → 공격형"
+        elif b > 0.8:
+            beta_desc = "시장과 비슷한 변동성"
+        elif b > 0.5:
+            beta_desc = "시장보다 덜 민감한 방어형"
+        else:
+            beta_desc = "매우 낮은 변동성 (고방어)"
+        lines.append(f"  베타(β):   {beta_em} <b>{b:.3f}</b>")
+        lines.append(f"             └ {beta_desc}")
+
+        # ── 알파 ──
+        a = capm["alpha_pct"]
+        alpha_sign = "+" if a >= 0 else ""
+        alpha_em = "✅" if a >= 0 else "⚠️"
+        if a >= 5:
+            alpha_desc = "시장 기대치 대비 큰 초과수익 중 🎯"
+        elif a >= 1:
+            alpha_desc = "시장 기대치 이상 달성 (양호)"
+        elif a >= -1:
+            alpha_desc = "시장 기대치 수준 (보통)"
+        elif a >= -5:
+            alpha_desc = "시장 기대치 하회 (부진)"
+        else:
+            alpha_desc = "시장 기대치 크게 하회 ⚠️"
+        lines.append(f"  알파(α):   {alpha_em} <b>{alpha_sign}{a:.2f}%</b>")
+        lines.append(f"             └ {alpha_desc}")
+
+        # ── 샤프 비율 ──
+        s = capm["sharpe"]
+        if s >= 1.5:
+            sharpe_em, sharpe_desc = "🏆", "리스크 대비 수익 매우 우수"
+        elif s >= 1.0:
+            sharpe_em, sharpe_desc = "✅", "리스크 대비 수익 우수"
+        elif s >= 0.5:
+            sharpe_em, sharpe_desc = "🟡", "리스크 대비 수익 양호"
+        elif s >= 0:
+            sharpe_em, sharpe_desc = "🟠", "리스크 대비 수익 저조"
+        else:
+            sharpe_em, sharpe_desc = "🔴", "무위험 수익률에도 미달"
+        lines.append(f"  샤프:      {sharpe_em} <b>{s:.3f}</b>")
+        lines.append(f"             └ {sharpe_desc}")
+
+        # ── 실제 vs 기대 수익률 ──
+        lines.append("")
+        act, exp = capm["actual_pct"], capm["expected_pct"]
+        act_sign = "+" if act >= 0 else ""
+        exp_sign = "+" if exp >= 0 else ""
+        lines.append(f"  실제 수익(연율): <b>{act_sign}{act:.1f}%</b>")
+        lines.append(f"  CAPM 기대수익:  {exp_sign}{exp:.1f}%")
+        lines.append(f"  <i>(무위험 {capm['rf_pct']:.1f}% | S&P500 {capm['mkt_pct']:+.1f}% | {capm['n_days']}일 기준)</i>")
 
     return "\n".join(lines)
