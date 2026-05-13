@@ -273,34 +273,50 @@ def backfill_snapshots(days: int = 90) -> int:
 
 def clean_anomalous_snapshots(threshold: float = 0.6) -> int:
     """
-    직전/다음 스냅샷 대비 모두 40% 이상 낮은 이상값 항목을 제거.
-    (주말 장 휴장 시 가격 0 저장 문제 등 대응)
+    두 가지 이상값을 제거:
+    1. 주말 날짜 스냅샷 (장 휴장일에 잘못 저장된 가격)
+    2. 직전/다음 대비 모두 40% 이상 낮은 이상값 (threshold 기준)
     반환: 제거된 항목 수
     """
     data = _load_snapshots()
-    if len(data) < 3:
+    if not data:
         return 0
 
-    sorted_items = sorted(data.items(), key=lambda x: x[0])
     to_remove = []
 
-    for i in range(1, len(sorted_items) - 1):
-        date_str, snap = sorted_items[i]
-        prev_total = sorted_items[i - 1][1].get("total_krw", 0)
-        next_total = sorted_items[i + 1][1].get("total_krw", 0)
-        curr_total = snap.get("total_krw", 0)
-        if (prev_total > 0 and next_total > 0
-                and curr_total < prev_total * threshold
-                and curr_total < next_total * threshold):
-            to_remove.append(date_str)
-            logger.info(
-                f"Removing anomalous snapshot: {date_str} "
-                f"({curr_total:,.0f} KRW | prev={prev_total:,.0f} next={next_total:,.0f})"
-            )
+    # ① 주말 항목 제거
+    for date_str in list(data.keys()):
+        try:
+            d = date.fromisoformat(date_str)
+            if d.weekday() >= 5:  # 토(5) / 일(6)
+                to_remove.append(date_str)
+                logger.info(f"Removing weekend snapshot: {date_str}")
+        except ValueError:
+            pass
+
+    # ② 직전/다음 대비 threshold 이하인 이상값 제거 (3개 이상일 때)
+    if len(data) >= 3:
+        sorted_items = sorted(
+            [(k, v) for k, v in data.items() if k not in to_remove],
+            key=lambda x: x[0],
+        )
+        for i in range(1, len(sorted_items) - 1):
+            date_str, snap = sorted_items[i]
+            prev_total = sorted_items[i - 1][1].get("total_krw", 0)
+            next_total = sorted_items[i + 1][1].get("total_krw", 0)
+            curr_total = snap.get("total_krw", 0)
+            if (prev_total > 0 and next_total > 0
+                    and curr_total < prev_total * threshold
+                    and curr_total < next_total * threshold):
+                to_remove.append(date_str)
+                logger.info(
+                    f"Removing anomalous snapshot: {date_str} "
+                    f"({curr_total:,.0f} KRW | prev={prev_total:,.0f} next={next_total:,.0f})"
+                )
 
     if to_remove:
         for d in to_remove:
-            del data[d]
+            data.pop(d, None)
         _save_snapshots(data)
 
     return len(to_remove)
