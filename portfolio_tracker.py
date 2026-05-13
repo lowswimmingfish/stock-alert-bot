@@ -586,18 +586,27 @@ def calc_capm_metrics(days: int = 90) -> dict:
     cov_matrix = np.cov(port_r, mkt_r)
     beta = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else 1.0
 
-    # ── 연율화 수익률 ──
     n_days = len(port_r)
-    actual_annual = (1 + port_r.mean()) ** 252 - 1
-    mkt_annual    = (1 + mkt_r.mean())  ** 252 - 1  # 최근 실현수익률 (표시용)
+
+    # ── 기간 수익률 (기하평균 — 복리 기준, 올바른 방식) ──
+    # 산술평균 연율화((1+mean)^252)는 변동성이 클수록 부풀어 실제보다 과대 표시됨.
+    # 기하 총수익률을 먼저 구한 뒤 연율화해야 정확함.
+    total_port = float(np.prod(1 + port_r)) - 1      # 기간 내 실제 누적수익률
+    total_mkt  = float(np.prod(1 + mkt_r))  - 1
+
+    # ── 연율화 (기하) ──
+    actual_annual = (1 + total_port) ** (252 / n_days) - 1
+    mkt_annual    = (1 + total_mkt)  ** (252 / n_days) - 1
 
     # ── CAPM 기대수익률 ──
-    # 최근 단기 실현수익률을 연율화해서 쓰면 시장 급락기에 -50%+ 이상한 값이 나옴.
-    # CAPM은 장기 기대수익률 모델이므로 ERP는 장기 평균값(Damodaran 기준 5.5%) 사용.
+    # 단기 실현수익률을 연율화해 쓰면 시장 급락기에 -50%+ 이상한 값이 나옴.
+    # CAPM은 장기 기대수익률 모델 → ERP는 장기 평균(Damodaran ~5.5%) 사용.
     ERP_LONGRUN = 0.055
     expected_annual = rf_annual + beta * ERP_LONGRUN
+    # 기간 환산 (n_days 기준, 연율과 비교 가능하도록)
+    expected_period = (1 + expected_annual) ** (n_days / 252) - 1
 
-    # ── Jensen's Alpha (연율화) ──
+    # ── Jensen's Alpha (연율 기준) ──
     alpha = actual_annual - expected_annual
 
     # ── 샤프 비율 (연율화) ──
@@ -608,16 +617,18 @@ def calc_capm_metrics(days: int = 90) -> dict:
     treynor = ((port_r.mean() - rf_daily) * 252) / beta if beta != 0 else 0.0
 
     return {
-        "beta":            round(float(beta), 3),
-        "alpha_pct":       round(float(alpha * 100), 2),
-        "sharpe":          round(float(sharpe), 3),
-        "treynor_pct":     round(float(treynor * 100), 2),
-        "expected_pct":    round(float(expected_annual * 100), 2),
-        "actual_pct":      round(float(actual_annual * 100), 2),
-        "rf_pct":          round(float(rf_annual * 100), 2),
-        "mkt_pct":         round(float(mkt_annual * 100), 2),  # 최근 실현수익률 (표시용)
-        "erp_pct":         round(ERP_LONGRUN * 100, 1),        # 장기 ERP (5.5%)
-        "n_days":          n_days,
+        "beta":             round(float(beta), 3),
+        "alpha_pct":        round(float(alpha * 100), 2),
+        "sharpe":           round(float(sharpe), 3),
+        "treynor_pct":      round(float(treynor * 100), 2),
+        "actual_period_pct":   round(total_port * 100, 2),          # 기간 실제 수익률
+        "expected_period_pct": round(expected_period * 100, 2),     # 기간 CAPM 기대
+        "actual_pct":       round(float(actual_annual * 100), 2),   # 연율환산 (참고용)
+        "expected_pct":     round(float(expected_annual * 100), 2), # 연율 CAPM 기대
+        "rf_pct":           round(float(rf_annual * 100), 2),
+        "mkt_pct":          round(float(mkt_annual * 100), 2),
+        "erp_pct":          round(ERP_LONGRUN * 100, 1),
+        "n_days":           n_days,
     }
 
 
@@ -943,14 +954,17 @@ def get_performance_summary(days: int = 30) -> str:
 
         # ── 실제 vs 기대 수익률 ──
         lines.append("")
-        act, exp = capm["actual_pct"], capm["expected_pct"]
-        act_sign = "+" if act >= 0 else ""
-        exp_sign = "+" if exp >= 0 else ""
-        lines.append(f"  실제 수익(연율): <b>{act_sign}{act:.1f}%</b>")
-        lines.append(f"  CAPM 기대수익:  {exp_sign}{exp:.1f}%")
+        ap  = capm["actual_period_pct"]
+        ep  = capm["expected_period_pct"]
+        aa  = capm["actual_pct"]
+        ea  = capm["expected_pct"]
+        ap_sign = "+" if ap >= 0 else ""
+        ep_sign = "+" if ep >= 0 else ""
+        lines.append(f"  실제 수익률: <b>{ap_sign}{ap:.1f}%</b>  <i>({capm['n_days']}일 / 연율 {aa:+.1f}%)</i>")
+        lines.append(f"  CAPM 기대치: {ep_sign}{ep:.1f}%  <i>({capm['n_days']}일 / 연율 {ea:+.1f}%)</i>")
         lines.append(
-            f"  <i>(무위험 {capm['rf_pct']:.1f}% | ERP {capm['erp_pct']:.1f}% 장기평균 "
-            f"| S&P500 최근 {capm['mkt_pct']:+.1f}% | {capm['n_days']}일 기준)</i>"
+            f"  <i>(Rf {capm['rf_pct']:.1f}% | ERP {capm['erp_pct']:.1f}% 장기평균"
+            f" | S&P500 최근 {capm['mkt_pct']:+.1f}% | {capm['n_days']}일 기준)</i>"
         )
 
     return "\n".join(lines)
