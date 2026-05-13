@@ -589,10 +589,13 @@ def calc_capm_metrics(days: int = 90) -> dict:
     # ── 연율화 수익률 ──
     n_days = len(port_r)
     actual_annual = (1 + port_r.mean()) ** 252 - 1
-    mkt_annual    = (1 + mkt_r.mean())  ** 252 - 1
+    mkt_annual    = (1 + mkt_r.mean())  ** 252 - 1  # 최근 실현수익률 (표시용)
 
     # ── CAPM 기대수익률 ──
-    expected_annual = rf_annual + beta * (mkt_annual - rf_annual)
+    # 최근 단기 실현수익률을 연율화해서 쓰면 시장 급락기에 -50%+ 이상한 값이 나옴.
+    # CAPM은 장기 기대수익률 모델이므로 ERP는 장기 평균값(Damodaran 기준 5.5%) 사용.
+    ERP_LONGRUN = 0.055
+    expected_annual = rf_annual + beta * ERP_LONGRUN
 
     # ── Jensen's Alpha (연율화) ──
     alpha = actual_annual - expected_annual
@@ -612,7 +615,8 @@ def calc_capm_metrics(days: int = 90) -> dict:
         "expected_pct":    round(float(expected_annual * 100), 2),
         "actual_pct":      round(float(actual_annual * 100), 2),
         "rf_pct":          round(float(rf_annual * 100), 2),
-        "mkt_pct":         round(float(mkt_annual * 100), 2),
+        "mkt_pct":         round(float(mkt_annual * 100), 2),  # 최근 실현수익률 (표시용)
+        "erp_pct":         round(ERP_LONGRUN * 100, 1),        # 장기 ERP (5.5%)
         "n_days":          n_days,
     }
 
@@ -944,6 +948,9 @@ def get_performance_summary(days: int = 30) -> str:
         exp_sign = "+" if exp >= 0 else ""
         lines.append(f"  실제 수익(연율): <b>{act_sign}{act:.1f}%</b>")
         lines.append(f"  CAPM 기대수익:  {exp_sign}{exp:.1f}%")
-        lines.append(f"  <i>(무위험 {capm['rf_pct']:.1f}% | S&P500 {capm['mkt_pct']:+.1f}% | {capm['n_days']}일 기준)</i>")
+        lines.append(
+            f"  <i>(무위험 {capm['rf_pct']:.1f}% | ERP {capm['erp_pct']:.1f}% 장기평균 "
+            f"| S&P500 최근 {capm['mkt_pct']:+.1f}% | {capm['n_days']}일 기준)</i>"
+        )
 
     return "\n".join(lines)
