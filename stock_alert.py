@@ -1,15 +1,40 @@
 #!/usr/bin/env python3
 """Daily stock portfolio alert bot - sends Telegram messages with portfolio status and market overview."""
 
+import fcntl
+import json
 import requests
 import anthropic
 import pytz
 import yfinance as yf
-from datetime import datetime
-from config_loader import load_config
+from datetime import datetime, date
+from config_loader import load_config, DATA_DIR
 import kis_api
 
 KST = pytz.timezone("Asia/Seoul")
+
+_SENT_FLAG = DATA_DIR / "daily_report_sent.json"
+_LOCK_PATH  = DATA_DIR / "daily_report.lock"
+
+
+def _kst_today() -> str:
+    """KST 기준 오늘 날짜 문자열 (YYYY-MM-DD).
+    리포트는 08:00 KST 실행 = 23:00 UTC(전날) → UTC date.today()와 KST 날짜가 달라짐."""
+    return datetime.now(KST).strftime("%Y-%m-%d")
+
+
+def _already_sent_today() -> bool:
+    """오늘(KST 기준) 이미 리포트를 발송했으면 True."""
+    try:
+        if _SENT_FLAG.exists():
+            return json.loads(_SENT_FLAG.read_text()).get("date") == _kst_today()
+    except Exception:
+        pass
+    return False
+
+
+def _mark_sent_today():
+    _SENT_FLAG.write_text(json.dumps({"date": _kst_today()}))
 
 
 def send_telegram(bot_token, chat_id, message):
@@ -18,7 +43,7 @@ def send_telegram(bot_token, chat_id, message):
         "chat_id": chat_id,
         "text": message,
         "parse_mode": "HTML",
-    })
+    }, timeout=15)   # timeout 없으면 네트워크 불안정 시 수 시간 hang 가능
     return resp.json()
 
 
@@ -85,10 +110,14 @@ def get_exchange_rate():
         rate = fi.last_price
         prev = fi.previous_close
         change_pct = (rate - prev) / prev * 100 if rate and prev else 0
-        return {"rate": round(rate or 0, 2), "change_pct": round(change_pct, 2)}
+        return {
+            "rate": round(rate or 0, 2),
+            "prev_rate": round(prev or 0, 2),
+            "change_pct": round(change_pct, 2),
+        }
     except Exception:
         pass
-    return {"rate": 0, "change_pct": 0}
+    return {"rate": 0, "prev_rate": 0, "change_pct": 0}
 
 
 def format_change(pct):
@@ -175,8 +204,11 @@ def build_message(config):
         # 해외주식 - yfinance fast_info로 실시간 가격 보정
         lines.append("<b>🇺🇸 US Stocks (실계좌)</b>")
         us_total_eval = 0
-        us_total_profit = 0
+        us_total_profit_usd = 0
         us_total_invested = 0
+        us_total_fx_effect = 0
+        fx_rate = fx["rate"] or 1
+        fx_prev = fx.get("prev_rate") or fx_rate
         for h in us_data["holdings"]:
             ticker = h["ticker"]
             curr = h["curr_price"]
@@ -194,32 +226,42 @@ def build_message(config):
                     day_chg = ""
             except Exception:
                 day_chg = ""
-            profit  = (curr - avg) * qty
-            pct     = profit / (avg * qty) * 100 if avg * qty else 0
-            us_total_eval    += curr * qty
-            us_total_profit  += profit
-            us_total_invested += avg * qty
-            pe = "📈" if profit >= 0 else "📉"
+            profit_usd = (curr - avg) * qty
+            pct        = profit_usd / (avg * qty) * 100 if avg * qty else 0
+            # 오늘 환율 효과: 현재 포지션 가치가 환율 변동으로 KRW 얼마나 변했는지
+            fx_effect  = curr * qty * (fx_rate - fx_prev)
+            us_total_eval       += curr * qty
+            us_total_profit_usd += profit_usd
+            us_total_invested   += avg * qty
+            us_total_fx_effect  += fx_effect
+            pe = "📈" if profit_usd >= 0 else "📉"
             lines.append(f"  {pe} <b>{ticker}</b>: ${curr:.2f}{day_chg} | {qty}주 | 평단 ${avg:.2f}")
-            lines.append(f"       손익 ${profit:+.2f} ({pct:+.1f}%)")
+            profit_krw = profit_usd * fx_rate
+            lines.append(f"       주가손익 ${profit_usd:+.2f} ({pct:+.1f}%) ≈ {profit_krw:+,.0f}원")
+            if abs(fx_effect) >= 100:
+                fx_dir = "▲" if fx_effect >= 0 else "▼"
+                lines.append(f"       환율효과 {fx_effect:+,.0f}원 (환율 {fx_dir}{abs(fx_rate - fx_prev):.1f}원)")
         if us_data["holdings"]:
-            pct_total = round(us_total_profit / us_total_invested * 100, 1) if us_total_invested else 0
-            pe = "📈" if us_total_profit >= 0 else "📉"
-            lines.append(f"  {pe} US합계: ${us_total_eval:,.2f} | 손익 ${us_total_profit:+,.2f} ({pct_total:+.1f}%)")
+            pct_total = round(us_total_profit_usd / us_total_invested * 100, 1) if us_total_invested else 0
+            pe = "📈" if us_total_profit_usd >= 0 else "📉"
+            total_us_profit_krw = us_total_profit_usd * fx_rate
+            lines.append(f"  {pe} US합계: ${us_total_eval:,.2f} | 주가손익 ${us_total_profit_usd:+,.2f} ({pct_total:+.1f}%)")
+            lines.append(f"       원화환산 {total_us_profit_krw:+,.0f}원 | 오늘 환율효과 {us_total_fx_effect:+,.0f}원")
         lines.append("")
 
         # 전체 합산 (원화 환산) - yfinance 실시간 가격 기준
         kr_eval = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
         kr_profit = kr_data["total"].get("profit", 0) if kr_data["total"] else 0
-        # us_total_eval / us_total_profit 은 위 루프에서 yfinance 가격으로 재계산된 값
-        rate = fx["rate"] or 1
-        total_krw = kr_eval + us_total_eval * rate
-        total_profit_krw = kr_profit + us_total_profit * rate
+        total_krw = kr_eval + us_total_eval * fx_rate
+        us_stock_profit_krw = us_total_profit_usd * fx_rate
+        total_profit_krw = kr_profit + us_stock_profit_krw
 
         pe = "📈" if total_profit_krw >= 0 else "📉"
         lines.append("<b>💰 Total (원화 환산)</b>")
         lines.append(f"  총 평가금: {total_krw:,.0f}원")
-        lines.append(f"  {pe} 총 손익: {total_profit_krw:+,.0f}원")
+        lines.append(f"  {pe} 총 주가손익: {total_profit_krw:+,.0f}원")
+        if us_data["holdings"] and abs(us_total_fx_effect) >= 100:
+            lines.append(f"  💱 오늘 환율효과: {us_total_fx_effect:+,.0f}원 (₩{fx_rate:,.1f}, 전일비 {fx['change_pct']:+.2f}%)")
 
     else:
         lines.append("⚠️ KIS API 미연결 - 포트폴리오 데이터 없음")
@@ -228,17 +270,41 @@ def build_message(config):
 
 
 def main():
-    config = load_config()
-    msg = build_message(config)
-    result = send_telegram(
-        config["telegram"]["bot_token"],
-        config["telegram"]["chat_id"],
-        msg,
-    )
-    if result.get("ok"):
-        print("Alert sent successfully!")
-    else:
-        print(f"Failed to send: {result}")
+    # ── 1차 방어: 빠른 날짜 체크 ──
+    if _already_sent_today():
+        print("Daily report already sent today — skipping duplicate.")
+        return
+
+    # ── 2차 방어: 파일 락 (Railway 구/신 컨테이너 동시 실행 race condition 방지) ──
+    # fcntl.flock은 같은 Volume을 마운트한 프로세스 간 원자적 배타 락을 보장
+    try:
+        lock_fd = open(_LOCK_PATH, "w")
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except IOError:
+        print("Daily report lock held by another process — skipping.")
+        return
+
+    try:
+        # 락 획득 후 재확인 (락 대기 중 다른 프로세스가 이미 보냈을 수도 있음)
+        if _already_sent_today():
+            print("Daily report already sent (confirmed after lock) — skipping.")
+            return
+
+        config = load_config()
+        msg = build_message(config)
+        result = send_telegram(
+            config["telegram"]["bot_token"],
+            config["telegram"]["chat_id"],
+            msg,
+        )
+        if result.get("ok"):
+            _mark_sent_today()
+            print("Alert sent successfully!")
+        else:
+            print(f"Failed to send: {result}")
+    finally:
+        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
+        lock_fd.close()
 
 
 if __name__ == "__main__":
