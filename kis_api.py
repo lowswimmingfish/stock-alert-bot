@@ -48,14 +48,25 @@ def _get_credentials():
 
 
 def _load_cached_token():
-    """캐시된 토큰 반환 (만료 시 None)."""
+    """캐시된 토큰 반환 (만료 1시간 전부터 갱신)."""
     if TOKEN_CACHE.exists():
         with open(TOKEN_CACHE) as f:
             data = json.load(f)
-        # 만료 10분 전부터 갱신
-        if data.get("expires_at", 0) - time.time() > 600:
+        # 만료 1시간 전부터 미리 갱신 (10분 버퍼로는 서버 측 조기 만료 못 막음)
+        if data.get("expires_at", 0) - time.time() > 3600:
             return data.get("access_token")
     return None
+
+
+def _invalidate_token():
+    """토큰 캐시 삭제 — 서버에서 만료 에러 받았을 때 즉시 호출."""
+    if TOKEN_CACHE.exists():
+        TOKEN_CACHE.unlink()
+    logger.info("KIS 토큰 캐시 삭제 (다음 호출 시 재발급)")
+
+
+def _is_token_expired_msg(msg: str) -> bool:
+    return "만료" in msg or "token" in msg.lower() or "인증" in msg
 
 
 def _save_token(token: str, expires_in: int):
@@ -117,6 +128,20 @@ def _headers(tr_id: str) -> dict:
         "tr_id": tr_id,
         "custtype": "P",
     }
+
+
+def _get(url: str, tr_id: str, params: dict) -> dict:
+    """GET 요청 + 토큰 만료 시 자동 재발급 후 1회 재시도."""
+    for attempt in range(2):
+        r = requests.get(url, headers=_headers(tr_id), params=params, timeout=10)
+        d = r.json()
+        msg = d.get("msg1", "")
+        if _is_token_expired_msg(msg) and attempt == 0:
+            logger.warning(f"KIS 토큰 만료 감지 ({msg}), 재발급 후 재시도...")
+            _invalidate_token()
+            continue
+        return d
+    return {}
 
 
 # ── 현재가 조회 ──────────────────────────────────────
@@ -275,19 +300,17 @@ def get_kr_balance_raw() -> dict:
         return cached
     try:
         app_key, app_secret, account_no, account_cd = _get_credentials()
-        resp = requests.get(
+        data = _get(
             f"{BASE_URL}/uapi/domestic-stock/v1/trading/inquire-balance",
-            headers=_headers("TTTC8434R"),
-            params={
+            "TTTC8434R",
+            {
                 "CANO": account_no, "ACNT_PRDT_CD": account_cd,
                 "AFHR_FLPR_YN": "N", "OFL_YN": "", "INQR_DVSN": "02",
                 "UNPR_DVSN": "01", "FUND_STTL_ICLD_YN": "N",
                 "FNCG_AMT_AUTO_RDPT_YN": "N", "PRCS_DVSN": "01",
                 "CTX_AREA_FK100": "", "CTX_AREA_NK100": "",
             },
-            timeout=10,
         )
-        data = resp.json()
         # API 오류 응답 체크
         if data.get("rt_cd") not in ("0", None) and data.get("rt_cd") != 0:
             logger.error(f"KIS 국내 잔고 API 오류: {data.get('msg1', '')} (rt_cd={data.get('rt_cd')})")
@@ -368,18 +391,16 @@ def get_us_balance_raw() -> dict:
             return str(rt) == "0"
 
         for excg in ["NASD", "NYSE", "AMEX"]:
-            r = requests.get(
+            d = _get(
                 f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-balance",
-                headers=_headers("TTTS3012R"),
-                params={
+                "TTTS3012R",
+                {
                     "CANO": account_no, "ACNT_PRDT_CD": account_cd,
                     "OVRS_EXCG_CD": excg,
                     "TR_CRCY_CD": "USD",
                     "CTX_AREA_FK200": "", "CTX_AREA_NK200": "",
                 },
-                timeout=10,
             )
-            d = r.json()
             rt = d.get("rt_cd")
             items = d.get("output1", [])
             logger.info(f"KIS 해외잔고 {excg}: rt_cd={rt}, items={len(items)}")
