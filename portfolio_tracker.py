@@ -10,6 +10,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 import pytz
 import yfinance as yf
 import matplotlib
@@ -512,6 +513,83 @@ def calc_stock_contribution(days: int = 30) -> list[dict]:
 
 # ── CAPM 분석 ────────────────────────────────────────────────────────────────
 
+def _calc_stock_beta(yf_ticker: str, benchmark: str, period: str = "2y") -> float | None:
+    """
+    개별 종목의 베타를 2년치 일별 수익률로 계산.
+    pd.concat으로 두 시장의 날짜를 자동 정렬 후 공통 거래일만 사용.
+    """
+    try:
+        s_hist = yf.Ticker(yf_ticker).history(period=period)["Close"]
+        m_hist = yf.Ticker(benchmark).history(period=period)["Close"]
+        if s_hist.empty or m_hist.empty:
+            return None
+        df = pd.concat(
+            [s_hist.pct_change().rename("s"), m_hist.pct_change().rename("m")],
+            axis=1,
+        ).dropna()
+        if len(df) < 60:
+            return None
+        cov = np.cov(df["s"].values, df["m"].values)
+        return float(cov[0, 1] / cov[1, 1]) if cov[1, 1] != 0 else None
+    except Exception:
+        return None
+
+
+def _portfolio_beta_from_holdings(snap: dict, fx_rate: float) -> float | None:
+    """
+    보유 종목별 2년치 히스토리로 개별 베타를 구한 뒤 시장가치 비중으로 가중합산.
+    - 미국 주식: S&P 500 (^GSPC) 기준
+    - 한국 주식: KOSDAQ (^KQ11) 우선, 실패 시 KOSPI (^KS11) fallback
+    """
+    holdings = snap.get("holdings", {})
+    if not holdings:
+        return None
+
+    items = []
+    for ticker, h in holdings.items():
+        qty = h.get("qty", 0)
+        if qty <= 0:
+            continue
+        curr = h.get("price", h.get("avg_price", 0))
+        is_us = "value_usd" in h
+        if is_us:
+            value_krw = curr * qty * fx_rate
+            items.append({"ticker": ticker, "yf_ticker": ticker,
+                          "benchmark": "^GSPC", "value_krw": value_krw, "is_us": True})
+        else:
+            value_krw = curr * qty
+            items.append({"ticker": ticker, "yf_ticker": ticker + ".KQ",
+                          "benchmark": "^KQ11", "value_krw": value_krw, "is_us": False})
+
+    total_value = sum(i["value_krw"] for i in items)
+    if total_value == 0:
+        return None
+
+    def _fetch(item):
+        beta = _calc_stock_beta(item["yf_ticker"], item["benchmark"])
+        # KR 종목: KOSDAQ 실패 시 KOSPI fallback
+        if beta is None and not item["is_us"]:
+            beta = _calc_stock_beta(item["ticker"] + ".KS", "^KS11")
+        return item, beta
+
+    portfolio_beta = 0.0
+    covered_weight = 0.0
+
+    with ThreadPoolExecutor(max_workers=max(len(items), 1)) as ex:
+        for item, beta in ex.map(_fetch, items):
+            weight = item["value_krw"] / total_value
+            if beta is not None:
+                portfolio_beta += weight * beta
+                covered_weight += weight
+
+    if covered_weight < 0.5:
+        return None
+
+    # 커버 안 된 비중은 베타 1.0 (시장 평균) 가정
+    portfolio_beta += (1.0 - covered_weight) * 1.0
+    return round(portfolio_beta, 3)
+
+
 def calc_capm_metrics(days: int = 90) -> dict:
     """
     포트폴리오의 CAPM 지표를 계산합니다.
@@ -582,9 +660,19 @@ def calc_capm_metrics(days: int = 90) -> dict:
         rf_annual = 0.043  # fallback 4.3%
     rf_daily = rf_annual / 252
 
-    # ── 베타 계산 ──
-    cov_matrix = np.cov(port_r, mkt_r)
-    beta = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else 1.0
+    # ── 베타 계산: 종목별 2년치 히스토리 가중합 ──
+    # 스냅샷 기간이 짧아도 안정적인 베타를 얻기 위해 개별 종목 장기 히스토리 사용.
+    # 미국 종목 → S&P500 기준 / 한국 종목 → KOSDAQ(KOSPI) 기준으로 각각 계산 후 비중 합산.
+    latest_snap = filtered[-1][1]
+    snap_fx = latest_snap.get("fx_rate", 1400)
+    beta = _portfolio_beta_from_holdings(latest_snap, snap_fx)
+    beta_source = "history"
+
+    if beta is None:
+        # 히스토리 계산 실패 시 스냅샷 기반 fallback
+        cov_matrix = np.cov(port_r, mkt_r)
+        beta = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else 1.0
+        beta_source = "snapshot"
 
     n_days = len(port_r)
 
@@ -618,6 +706,7 @@ def calc_capm_metrics(days: int = 90) -> dict:
 
     return {
         "beta":             round(float(beta), 3),
+        "beta_source":      beta_source,   # "history" | "snapshot"
         "alpha_pct":        round(float(alpha * 100), 2),
         "sharpe":           round(float(sharpe), 3),
         "treynor_pct":      round(float(treynor * 100), 2),
@@ -917,7 +1006,8 @@ def get_performance_summary(days: int = 30) -> str:
             beta_desc = "시장보다 덜 민감한 방어형"
         else:
             beta_desc = "매우 낮은 변동성 (고방어)"
-        lines.append(f"  베타(β):   {beta_em} <b>{b:.3f}</b>")
+        src_tag = "" if capm.get("beta_source") == "history" else " <i>(단기추정)</i>"
+        lines.append(f"  베타(β):   {beta_em} <b>{b:.3f}</b>{src_tag}")
         lines.append(f"             └ {beta_desc}")
 
         # ── 알파 ──

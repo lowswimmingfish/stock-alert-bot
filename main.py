@@ -2,7 +2,6 @@
 """Railway entry point - runs bot + scheduler in a single process."""
 
 import logging
-import time
 import pytz
 from apscheduler.schedulers.background import BackgroundScheduler
 from apscheduler.triggers.cron import CronTrigger
@@ -154,22 +153,23 @@ def run_weekly_analysis():
 def start_scheduler():
     scheduler = BackgroundScheduler(timezone=KST)
 
-    # 매일 오전 8시 (KST) — misfire_grace_time=300: 재시작 후 5분 이내에만 실행, coalesce=True: 중복 실행 방지
+    # 평일 08:00 KST — 국장(KRX 09:00) 1시간 전
     scheduler.add_job(
         run_daily_report,
-        CronTrigger(hour=8, minute=0, timezone=KST),
+        CronTrigger(hour=8, minute=0, day_of_week="mon-fri", timezone=KST),
         id="daily_report",
-        name="Daily Portfolio Report",
-        misfire_grace_time=60,   # 재시작 후 1분 이내에만 실행 (300→60으로 단축)
+        max_instances=1,
         coalesce=True,
     )
 
-    # 미국장 개장(09:30 ET) 1시간 전 = 08:30 ET, 평일만 (EDT/EST 자동 반영)
+    # 평일 08:30 ET — 미장(NYSE 09:30 ET) 1시간 전 (EDT/EST DST 자동 반영)
     scheduler.add_job(
         run_premarket,
         CronTrigger(hour=8, minute=30, day_of_week="mon-fri", timezone=ET),
         id="premarket",
-        name="Pre-market Briefing",
+        name="Pre-market Briefing (평일 ET 08:30)",
+        max_instances=1,
+        coalesce=True,
     )
 
     # 10분마다 뉴스 모니터링
@@ -181,12 +181,12 @@ def start_scheduler():
         name="News Monitor",
     )
 
-    # 매일 22:00 KST (미국 장 마감 후) 포트폴리오 스냅샷
+    # 평일 06:05 KST — KRX(15:30 KST)·NYSE(~05:00-06:00 KST) 모두 마감 후 당일 종가 스냅샷
     scheduler.add_job(
         run_snapshot,
-        CronTrigger(hour=22, minute=0, timezone=KST),
+        CronTrigger(hour=6, minute=5, day_of_week="mon-fri", timezone=KST),
         id="snapshot",
-        name="Portfolio Snapshot",
+        name="Portfolio Snapshot (평일 KST 06:05)",
     )
 
     # 5분마다 가격 알림 체크 (미국 장중에만 실제 동작)
@@ -198,28 +198,28 @@ def start_scheduler():
         name="Price Alert Check",
     )
 
-    # 매일 09:00 KST 이벤트 알림 (실적·배당·급등락)
+    # 평일 09:00 KST 이벤트 알림 (실적·배당·급등락)
     scheduler.add_job(
         run_event_alerts,
-        CronTrigger(hour=9, minute=0, timezone=KST),
+        CronTrigger(hour=9, minute=0, day_of_week="mon-fri", timezone=KST),
         id="event_alerts",
-        name="Event Alert Check",
+        name="Event Alert Check (평일)",
     )
 
-    # 매일 09:30 KST 애널리스트 레이팅 변경 알림
+    # 평일 09:30 KST 애널리스트 레이팅 변경 알림
     scheduler.add_job(
         run_analyst_alerts,
-        CronTrigger(hour=9, minute=30, timezone=KST),
+        CronTrigger(hour=9, minute=30, day_of_week="mon-fri", timezone=KST),
         id="analyst_alerts",
-        name="Analyst Rating Alerts",
+        name="Analyst Rating Alerts (평일)",
     )
 
-    # 매일 19:00 KST 실적 발표 전날 컨센서스 브리핑
+    # 평일 19:00 KST 실적 발표 전날 컨센서스 브리핑
     scheduler.add_job(
         run_earnings_consensus,
-        CronTrigger(hour=19, minute=0, timezone=KST),
+        CronTrigger(hour=19, minute=0, day_of_week="mon-fri", timezone=KST),
         id="earnings_consensus",
-        name="Earnings Consensus Briefing",
+        name="Earnings Consensus Briefing (평일)",
     )
 
     # 일요일 20:00 KST 주간 포트폴리오 심층 분석

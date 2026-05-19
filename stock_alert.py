@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Daily stock portfolio alert bot - sends Telegram messages with portfolio status and market overview."""
 
-import fcntl
 import json
 import requests
 import anthropic
 import pytz
 import yfinance as yf
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, date
 from config_loader import load_config, DATA_DIR
 import kis_api
@@ -14,7 +14,6 @@ import kis_api
 KST = pytz.timezone("Asia/Seoul")
 
 _SENT_FLAG = DATA_DIR / "daily_report_sent.json"
-_LOCK_PATH  = DATA_DIR / "daily_report.lock"
 
 
 def _kst_today() -> str:
@@ -48,33 +47,41 @@ def send_telegram(bot_token, chat_id, message):
 
 
 
+def _fetch_one_index(name_ticker):
+    """yfinance fast_info 단건 조회 (스레드에서 호출)."""
+    name, ticker = name_ticker
+    try:
+        fi = yf.Ticker(ticker).fast_info
+        curr = fi.last_price
+        prev = fi.previous_close
+        if curr and prev:
+            change_pct = (curr - prev) / prev * 100
+            return name, {"price": round(curr, 2), "change_pct": round(change_pct, 2)}
+    except Exception:
+        pass
+    return name, None
+
+
 def get_market_indices():
-    """Fetch major market indices (real-time via fast_info)."""
-    indices = {
+    """Fetch major market indices — 9개 동시 병렬 조회."""
+    tickers = {
         "S&P 500": "^GSPC",
-        "NASDAQ": "^IXIC",
-        "DOW": "^DJI",
-        "KOSPI": "^KS11",
-        "KOSDAQ": "^KQ11",
-        "VIX": "^VIX",
+        "NASDAQ":  "^IXIC",
+        "DOW":     "^DJI",
+        "KOSPI":   "^KS11",
+        "KOSDAQ":  "^KQ11",
+        "VIX":     "^VIX",
         "미국10년물": "^TNX",
         "금(Gold)": "GC=F",
-        "WTI원유": "CL=F",
+        "WTI원유":  "CL=F",
     }
     results = {}
-    for name, ticker in indices.items():
-        try:
-            fi = yf.Ticker(ticker).fast_info
-            curr = fi.last_price
-            prev = fi.previous_close
-            if curr and prev:
-                change_pct = (curr - prev) / prev * 100
-                results[name] = {
-                    "price": round(curr, 2),
-                    "change_pct": round(change_pct, 2),
-                }
-        except Exception:
-            pass
+    with ThreadPoolExecutor(max_workers=9) as ex:
+        futures = {ex.submit(_fetch_one_index, item): item[0] for item in tickers.items()}
+        for fut in as_completed(futures):
+            name, data = fut.result()
+            if data:
+                results[name] = data
     return results
 
 
@@ -137,8 +144,35 @@ def build_message(config):
     kis_api.invalidate_balance_cache()
 
     now = datetime.now(KST)
-    indices = get_market_indices()
-    fx = get_exchange_rate()
+
+    # ── 1단계: 독립 API 4개 병렬 실행 ──────────────────────────────────
+    # get_market_indices(9 yfinance) / get_exchange_rate(1 yfinance) /
+    # get_kr_balance_raw / get_us_balance_raw  →  동시 시작
+    _kr_data_holder = [None]
+    _us_data_holder = [None]
+
+    def _fetch_kr():
+        if kis_api.is_configured():
+            _kr_data_holder[0] = kis_api.get_kr_balance_raw()
+
+    def _fetch_us():
+        if kis_api.is_configured():
+            _us_data_holder[0] = kis_api.get_us_balance_raw()
+
+    with ThreadPoolExecutor(max_workers=4) as ex:
+        f_idx = ex.submit(get_market_indices)
+        f_fx  = ex.submit(get_exchange_rate)
+        f_kr  = ex.submit(_fetch_kr)
+        f_us  = ex.submit(_fetch_us)
+        indices = f_idx.result()
+        fx      = f_fx.result()
+        f_kr.result()
+        f_us.result()
+
+    kr_data = _kr_data_holder[0] or {"holdings": [], "total": {}}
+    us_data = _us_data_holder[0] or {"holdings": [], "total": {}}
+
+    # ── 2단계: Claude 시황 요약 (indices 필요 → 직렬) ───────────────────
     market_summary = get_market_summary_ai(indices, fx, config)
 
     lines = []
@@ -186,8 +220,7 @@ def build_message(config):
 
     # ── KIS API 실계좌 포트폴리오 ──
     if kis_api.is_configured():
-        kr_data = kis_api.get_kr_balance_raw()
-        us_data = kis_api.get_us_balance_raw()
+        # kr_data / us_data 는 1단계 병렬 패치에서 이미 받아둠
 
         # 국내주식
         lines.append("<b>🇰🇷 KR Stocks (실계좌)</b>")
@@ -201,7 +234,7 @@ def build_message(config):
             lines.append(f"  {pe} KR합계: {t.get('eval_amt', 0):,}원 | 손익 {t.get('profit', 0):+,}원 ({t.get('profit_pct', 0):+.1f}%)")
         lines.append("")
 
-        # 해외주식 - yfinance fast_info로 실시간 가격 보정
+        # 해외주식 - yfinance fast_info로 실시간 가격 보정 (보유 종목 동시 조회)
         lines.append("<b>🇺🇸 US Stocks (실계좌)</b>")
         us_total_eval = 0
         us_total_profit_usd = 0
@@ -209,23 +242,34 @@ def build_message(config):
         us_total_fx_effect = 0
         fx_rate = fx["rate"] or 1
         fx_prev = fx.get("prev_rate") or fx_rate
-        for h in us_data["holdings"]:
+
+        def _fetch_us_price(h):
+            """종목 1개 yfinance 조회 → (ticker, curr, day_chg)."""
             ticker = h["ticker"]
-            curr = h["curr_price"]
-            avg  = h["avg_price"]
-            qty  = h["qty"]
-            # yfinance 실시간 가격으로 덮어쓰기
+            curr   = h["curr_price"]
             try:
                 fi = yf.Ticker(ticker).fast_info
                 yf_price = fi.last_price
                 yf_prev  = fi.previous_close
                 if yf_price and yf_price > 0:
-                    curr = yf_price
-                    day_chg = f" ({(curr - yf_prev) / yf_prev * 100:+.2f}%)" if yf_prev else ""
-                else:
-                    day_chg = ""
+                    day_chg = f" ({(yf_price - yf_prev) / yf_prev * 100:+.2f}%)" if yf_prev else ""
+                    return ticker, yf_price, day_chg
             except Exception:
-                day_chg = ""
+                pass
+            return ticker, curr, ""
+
+        # 보유 종목 수만큼 스레드 병렬 실행
+        price_map: dict[str, tuple] = {}
+        if us_data["holdings"]:
+            with ThreadPoolExecutor(max_workers=len(us_data["holdings"])) as ex:
+                for tkr, price, chg in ex.map(_fetch_us_price, us_data["holdings"]):
+                    price_map[tkr] = (price, chg)
+
+        for h in us_data["holdings"]:
+            ticker = h["ticker"]
+            avg    = h["avg_price"]
+            qty    = h["qty"]
+            curr, day_chg = price_map.get(ticker, (h["curr_price"], ""))
             profit_usd = (curr - avg) * qty
             pct        = profit_usd / (avg * qty) * 100 if avg * qty else 0
             # 오늘 환율 효과: 현재 포지션 가치가 환율 변동으로 KRW 얼마나 변했는지
@@ -270,41 +314,28 @@ def build_message(config):
 
 
 def main():
-    # ── 1차 방어: 빠른 날짜 체크 ──
+    if datetime.now(KST).weekday() >= 5:
+        print("Weekend — daily report skipped.")
+        return
+
     if _already_sent_today():
-        print("Daily report already sent today — skipping duplicate.")
+        print("Daily report already sent today — skipping.")
         return
 
-    # ── 2차 방어: 파일 락 (Railway 구/신 컨테이너 동시 실행 race condition 방지) ──
-    # fcntl.flock은 같은 Volume을 마운트한 프로세스 간 원자적 배타 락을 보장
-    try:
-        lock_fd = open(_LOCK_PATH, "w")
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except IOError:
-        print("Daily report lock held by another process — skipping.")
-        return
+    _mark_sent_today()  # build 전에 먼저 기록 — 두 번째 프로세스가 동시에 시작해도 막힘
 
-    try:
-        # 락 획득 후 재확인 (락 대기 중 다른 프로세스가 이미 보냈을 수도 있음)
-        if _already_sent_today():
-            print("Daily report already sent (confirmed after lock) — skipping.")
-            return
+    config = load_config()
+    msg = build_message(config)
 
-        config = load_config()
-        msg = build_message(config)
-        result = send_telegram(
-            config["telegram"]["bot_token"],
-            config["telegram"]["chat_id"],
-            msg,
-        )
-        if result.get("ok"):
-            _mark_sent_today()
-            print("Alert sent successfully!")
-        else:
-            print(f"Failed to send: {result}")
-    finally:
-        fcntl.flock(lock_fd.fileno(), fcntl.LOCK_UN)
-        lock_fd.close()
+    result = send_telegram(
+        config["telegram"]["bot_token"],
+        config["telegram"]["chat_id"],
+        msg,
+    )
+    if result.get("ok"):
+        print("Alert sent successfully!")
+    else:
+        print(f"Failed to send: {result}")
 
 
 if __name__ == "__main__":
