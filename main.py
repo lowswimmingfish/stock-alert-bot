@@ -265,8 +265,8 @@ if __name__ == "__main__":
     except Exception as e:
         logger.error(f"Snapshot cleanup error: {e}")
 
-    # 시작하자마자 뉴스 1회 실행
-    run_news_monitor()
+    # 뉴스는 스케줄러가 10분 후 첫 실행 — 배포 직후 즉시 실행 제거
+    # (재배포 반복 시 매번 즉시 실행되어 알림 폭탄 유발)
 
     scheduler = start_scheduler()
 
