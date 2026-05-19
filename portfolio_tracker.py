@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import requests
+from typing import Optional
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
@@ -513,20 +514,22 @@ def calc_stock_contribution(days: int = 30) -> list[dict]:
 
 # ── CAPM 분석 ────────────────────────────────────────────────────────────────
 
-def _calc_stock_beta(yf_ticker: str, benchmark: str, period: str = "2y") -> float | None:
+def _calc_stock_beta(yf_ticker: str, benchmark: str, period: str = "2y") -> Optional[float]:
     """
     개별 종목의 베타를 2년치 일별 수익률로 계산.
-    pd.concat으로 두 시장의 날짜를 자동 정렬 후 공통 거래일만 사용.
+    인덱스를 date 객체로 변환 후 concat → timezone 충돌 방지.
     """
     try:
         s_hist = yf.Ticker(yf_ticker).history(period=period)["Close"]
         m_hist = yf.Ticker(benchmark).history(period=period)["Close"]
         if s_hist.empty or m_hist.empty:
             return None
-        df = pd.concat(
-            [s_hist.pct_change().rename("s"), m_hist.pct_change().rename("m")],
-            axis=1,
-        ).dropna()
+        s_ret = s_hist.pct_change()
+        m_ret = m_hist.pct_change()
+        # timezone-aware DatetimeIndex → date 객체로 통일 (US/KR 시장 timezone 충돌 방지)
+        s_ret.index = [i.date() if hasattr(i, "date") else i for i in s_ret.index]
+        m_ret.index = [i.date() if hasattr(i, "date") else i for i in m_ret.index]
+        df = pd.concat([s_ret.rename("s"), m_ret.rename("m")], axis=1).dropna()
         if len(df) < 60:
             return None
         cov = np.cov(df["s"].values, df["m"].values)
@@ -535,7 +538,7 @@ def _calc_stock_beta(yf_ticker: str, benchmark: str, period: str = "2y") -> floa
         return None
 
 
-def _portfolio_beta_from_holdings(snap: dict, fx_rate: float) -> float | None:
+def _portfolio_beta_from_holdings(snap: dict, fx_rate: float) -> Optional[float]:
     """
     보유 종목별 2년치 히스토리로 개별 베타를 구한 뒤 시장가치 비중으로 가중합산.
     - 미국 주식: S&P 500 (^GSPC) 기준
