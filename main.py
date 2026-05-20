@@ -160,6 +160,7 @@ def start_scheduler():
         id="daily_report",
         max_instances=1,
         coalesce=True,
+        misfire_grace_time=60,  # 재시작 후 60초 이내 misfire만 실행, 그 이후는 스킵
     )
 
     # 평일 08:30 ET — 미장(NYSE 09:30 ET) 1시간 전 (EDT/EST DST 자동 반영)
