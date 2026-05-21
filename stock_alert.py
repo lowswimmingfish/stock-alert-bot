@@ -266,12 +266,13 @@ def build_message(config):
                     price_map[tkr] = (price, chg)
 
         for h in us_data["holdings"]:
-            ticker = h["ticker"]
-            avg    = h["avg_price"]
-            qty    = h["qty"]
+            ticker     = h["ticker"]
+            avg        = h["avg_price"]
+            qty        = h["qty"]
             curr, day_chg = price_map.get(ticker, (h["curr_price"], ""))
-            profit_usd = (curr - avg) * qty
-            pct        = profit_usd / (avg * qty) * 100 if avg * qty else 0
+            # KIS 계산값 그대로 사용 (yfinance 재계산 X)
+            profit_usd = h.get("profit", (curr - avg) * qty)
+            pct        = h.get("profit_pct", profit_usd / (avg * qty) * 100 if avg * qty else 0)
             # 오늘 환율 효과: 현재 포지션 가치가 환율 변동으로 KRW 얼마나 변했는지
             fx_effect  = curr * qty * (fx_rate - fx_prev)
             us_total_eval       += curr * qty
