@@ -271,8 +271,8 @@ def build_message(config):
             qty        = h["qty"]
             curr, day_chg = price_map.get(ticker, (h["curr_price"], ""))
             # KIS 계산값 그대로 사용 (yfinance 재계산 X)
-            profit_usd = h.get("profit", (curr - avg) * qty)
-            pct        = h.get("profit_pct", profit_usd / (avg * qty) * 100 if avg * qty else 0)
+            profit_usd = h["profit"]      # frcr_evlu_pfls_amt (USD)
+            pct        = h["profit_pct"]  # KIS 수익률
             # 오늘 환율 효과: 현재 포지션 가치가 환율 변동으로 KRW 얼마나 변했는지
             fx_effect  = curr * qty * (fx_rate - fx_prev)
             us_total_eval       += curr * qty
