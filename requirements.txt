@@ -4,9 +4,10 @@ pykrx
 requests
 tavily-python
 beautifulsoup4
-ddgs
+duckduckgo-search
 apscheduler
 pytz
 matplotlib
 pandas
 numpy
+exchange_calendars

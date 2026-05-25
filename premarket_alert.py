@@ -1,24 +1,31 @@
 #!/usr/bin/env python3
 """Pre-market briefing - sent before US market opens with overnight news, futures, and portfolio analysis."""
 
-import requests
+import json
 import anthropic
 import pytz
 import yfinance as yf
-from pathlib import Path
 from datetime import datetime
-from config_loader import load_config
+from config_loader import load_config, DATA_DIR
+from utils import send_telegram
 import kis_api
 
 KST = pytz.timezone("Asia/Seoul")
 
+_SENT_FLAG = DATA_DIR / "premarket_sent.json"
 
-def send_telegram(bot_token, chat_id, text):
-    url = f"https://api.telegram.org/bot{bot_token}/sendMessage"
-    while text:
-        chunk = text[:4000]
-        text = text[4000:]
-        requests.post(url, json={"chat_id": chat_id, "text": chunk, "parse_mode": "HTML"})
+
+def _already_sent_today() -> bool:
+    try:
+        if _SENT_FLAG.exists():
+            return json.loads(_SENT_FLAG.read_text()).get("date") == datetime.now(KST).strftime("%Y-%m-%d")
+    except Exception:
+        pass
+    return False
+
+
+def _mark_sent_today():
+    _SENT_FLAG.write_text(json.dumps({"date": datetime.now(KST).strftime("%Y-%m-%d")}))
 
 
 def get_futures():
@@ -188,15 +195,36 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
 
 
 def main():
-    # 08:00~09:30 ET 범위 밖이면 스킵 (DST 자동 반영)
+    # 08:20~08:40 ET 범위 밖이면 스킵 (중복 발송 방지, DST 자동 반영)
     now_et = datetime.now(pytz.timezone("America/New_York"))
+    if now_et.weekday() >= 5:  # 토(5), 일(6) 스킵
+        print(f"Skipped: weekend (ET: {now_et.strftime('%A %H:%M')})")
+        return
     t = now_et.hour * 60 + now_et.minute
-    in_window = (8 * 60) <= t <= (9 * 60 + 30)
+    in_window = (8 * 60 + 20) <= t <= (8 * 60 + 40)
     if not in_window:
         print(f"Skipped: outside window (ET: {now_et.strftime('%H:%M')})")
         return
 
+    if _already_sent_today():
+        print("Pre-market briefing already sent today — skipping.")
+        return
+
+    _mark_sent_today()
+
     config = load_config()
+
+    # NYSE 공휴일 체크
+    from utils import is_us_market_holiday
+    today_et = now_et.date()
+    if is_us_market_holiday(today_et):
+        send_telegram(
+            config["telegram"]["bot_token"],
+            config["telegram"]["chat_id"],
+            f"🇺🇸 오늘({today_et.strftime('%m/%d')}) 미국 증시 휴장입니다.",
+        )
+        print(f"NYSE holiday ({today_et}) — holiday notice sent.")
+        return
 
     # 미장 개장 전 브리핑만 전송 (리포트는 매일 8시 KST에 별도 발송)
     msg = build_premarket_briefing(config)

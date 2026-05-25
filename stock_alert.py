@@ -323,9 +323,31 @@ def main():
         print("Daily report already sent today — skipping.")
         return
 
+    config = load_config()
+
+    # KRX 공휴일 체크
+    from utils import is_kr_market_holiday
+    today_kst = datetime.now(KST).date()
+    if is_kr_market_holiday(today_kst):
+        _mark_sent_today()
+        send_telegram(
+            config["telegram"]["bot_token"],
+            config["telegram"]["chat_id"],
+            f"🎌 오늘({today_kst.strftime('%m/%d')}) 한국 증시 휴장입니다.",
+        )
+        print(f"KRX holiday ({today_kst}) — holiday notice sent.")
+        return
+
     _mark_sent_today()  # build 전에 먼저 기록 — 두 번째 프로세스가 동시에 시작해도 막힘
 
-    config = load_config()
+    # 포트폴리오 스냅샷 저장 (CAPM·성과차트용 일별 데이터 누적)
+    try:
+        from portfolio_tracker import take_snapshot
+        snap = take_snapshot()
+        print(f"Snapshot saved: {snap['total_krw']:,.0f} KRW")
+    except Exception as e:
+        print(f"Snapshot error (non-fatal): {e}")
+
     msg = build_message(config)
 
     result = send_telegram(

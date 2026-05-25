@@ -41,10 +41,15 @@ def run_news_monitor():
 
 
 def run_snapshot():
-    """매일 장 마감 후 포트폴리오 스냅샷 저장 (주말 스킵)."""
+    """매일 장 마감 후 포트폴리오 스냅샷 저장 (주말·공휴일 스킵)."""
     try:
         import datetime as dt
-        if dt.datetime.now(ET).weekday() >= 5:  # 토(5)/일(6) — 시장 휴장
+        from utils import is_us_market_holiday
+        now_et = dt.datetime.now(ET)
+        if now_et.weekday() >= 5:  # 토(5)/일(6) — 시장 휴장
+            return
+        if is_us_market_holiday(now_et.date()):
+            logger.info(f"Snapshot skipped: NYSE holiday ({now_et.date()})")
             return
         from portfolio_tracker import take_snapshot
         snap = take_snapshot()
@@ -88,6 +93,11 @@ def run_price_alerts():
 def run_event_alerts():
     """실적·배당·급등락 이벤트 알림 (매일 1회)."""
     try:
+        import datetime as dt
+        from utils import is_us_market_holiday
+        if is_us_market_holiday(dt.datetime.now(ET).date()):
+            logger.info("Event alerts skipped: NYSE holiday")
+            return
         from config_loader import load_config
         import requests as req
         import kis_api
@@ -128,6 +138,11 @@ def run_event_alerts():
 
 def run_analyst_alerts():
     try:
+        import datetime as dt
+        from utils import is_us_market_holiday
+        if is_us_market_holiday(dt.datetime.now(ET).date()):
+            logger.info("Analyst alerts skipped: NYSE holiday")
+            return
         from tavily_alerts import run_analyst_alerts as _fn
         _fn()
     except Exception as e:
@@ -136,6 +151,11 @@ def run_analyst_alerts():
 
 def run_earnings_consensus():
     try:
+        import datetime as dt
+        from utils import is_us_market_holiday
+        if is_us_market_holiday(dt.datetime.now(ET).date()):
+            logger.info("Earnings consensus skipped: NYSE holiday")
+            return
         from tavily_alerts import run_earnings_consensus as _fn
         _fn()
     except Exception as e:
