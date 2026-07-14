@@ -4,6 +4,7 @@
 import json
 import logging
 from datetime import date, datetime
+import pandas as pd
 import yfinance as yf
 from config_loader import DATA_DIR
 
@@ -188,7 +189,6 @@ def check_earnings_alerts(holdings: list, send_fn) -> int:
                 continue
 
             # calendar는 DataFrame 또는 dict
-            import pandas as pd
             if isinstance(cal, pd.DataFrame):
                 if "Earnings Date" in cal.columns:
                     earn_dates = cal["Earnings Date"].dropna().tolist()

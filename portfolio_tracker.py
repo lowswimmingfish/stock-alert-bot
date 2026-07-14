@@ -6,6 +6,7 @@ import json
 import logging
 import time
 import requests
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -58,12 +59,13 @@ def _save_snapshots(data: dict):
 
 # ── 매입 원가 계산 헬퍼 ──────────────────────────────────────────────────────
 
-def _cost_krw(snap: dict) -> float:
+def _cost_krw(snap: dict, ref_fx: float = None) -> float:
     """스냅샷에서 매입 원가 총액(KRW 환산)을 계산.
-    US 주식: avg_price(USD) × qty × fx_rate
+    US 주식: avg_price(USD) × qty × ref_fx  (ref_fx = 매입 시점 환율 근사값, 고정값)
     KR 주식: avg_price(KRW) × qty
+    ref_fx를 None으로 두면 snap의 당일 환율을 사용 (환율 효과 미반영 — 권장하지 않음).
     """
-    fx = snap.get("fx_rate", 1400)
+    fx = ref_fx if ref_fx is not None else snap.get("fx_rate", 1400)
     cost = 0.0
     for h in snap.get("holdings", {}).values():
         qty = h.get("qty", 0)
@@ -524,8 +526,8 @@ def _calc_stock_beta(yf_ticker: str, benchmark: str, period: str = "2y") -> Opti
         m_hist = yf.Ticker(benchmark).history(period=period)["Close"]
         if s_hist.empty or m_hist.empty:
             return None
-        s_ret = s_hist.pct_change()
-        m_ret = m_hist.pct_change()
+        s_ret = s_hist.pct_change(fill_method=None)
+        m_ret = m_hist.pct_change(fill_method=None)
         # timezone-aware DatetimeIndex → date 객체로 통일 (US/KR 시장 timezone 충돌 방지)
         s_ret.index = [i.date() if hasattr(i, "date") else i for i in s_ret.index]
         m_ret.index = [i.date() if hasattr(i, "date") else i for i in m_ret.index]
@@ -749,8 +751,11 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
     dates  = [d for d, _ in filtered]
     values = [v["total_krw"] for _, v in filtered]
 
-    # ── 매입가 기준 수익률 (추가 매수 왜곡 없음) ──
-    costs = [_cost_krw(snap) for _, snap in filtered]
+    # ── 매입가 기준 수익률 (환율 효과 포함) ──
+    # US 주식 원가는 매입 시점 환율로 고정해야 환율 손익이 평가금에 반영됨.
+    # 첫 스냅샷 환율을 매입 시점 환율 근사값으로 사용.
+    ref_fx = filtered[0][1].get("fx_rate", 1400)
+    costs = [_cost_krw(snap, ref_fx=ref_fx) for _, snap in filtered]
     pct_returns = [
         (v / c - 1) * 100 if c > 0 else 0.0
         for v, c in zip(values, costs)
@@ -832,7 +837,9 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
     ax1.set_ylabel("수익률 % (매입가 기준)", color="#aaaaaa", fontsize=10)
     ax1.legend(facecolor="#1a1a2e", labelcolor="white", fontsize=9,
                framealpha=0.8, loc="upper left")
-    ax1.set_title(f"포트폴리오 성과 (최근 {days}일 | 매입가 기준)", color="white", fontsize=13, pad=12)
+    fx_chg = (dates[-1] != dates[0]) and ref_fx > 0
+    fx_label = f"FX ref {ref_fx:.0f}" if fx_chg else ""
+    ax1.set_title(f"포트폴리오 성과 (최근 {days}일 | 매입가+환율 기준)", color="white", fontsize=13, pad=12)
 
     # CAPM + MDD 요약 텍스트 박스
     info_lines = []
@@ -842,6 +849,8 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
     if mdd_info:
         rec = mdd_info['recovery_pct']
         info_lines.append(f"MDD=-{mdd_info['mdd_pct']:.1f}%  회복={rec:.0f}%")
+    if fx_label:
+        info_lines.append(fx_label)
     if info_lines:
         ax1.text(0.99, 0.05, "\n".join(info_lines), transform=ax1.transAxes,
                  color="#cccccc", fontsize=8, ha="right", va="bottom",
@@ -920,15 +929,18 @@ def get_performance_summary(days: int = 30) -> str:
     first_d, first_v = filtered[0]
     last_d,  last_v  = filtered[-1]
 
+    # US 주식 원가는 첫 스냅샷 환율로 고정 (환율 효과를 평가금에 반영)
+    ref_fx = first_v.get("fx_rate", 1400)
+
     curr = last_v["total_krw"]
-    cost = _cost_krw(last_v)              # 현재 보유분 매입 원가 (KRW)
+    cost = _cost_krw(last_v, ref_fx=ref_fx)   # 매입 원가 (환율 고정)
     pct  = (curr / cost - 1) * 100 if cost > 0 else 0.0
-    gain = curr - cost                    # 미실현 손익
+    gain = curr - cost                         # 미실현 손익 (환율 손익 포함)
     sign  = "+" if pct >= 0 else ""
     arrow = "📈" if pct >= 0 else "📉"
 
     # 기간 내 변화 (보조 지표)
-    cost_first = _cost_krw(first_v)
+    cost_first = _cost_krw(first_v, ref_fx=ref_fx)
     base_first = first_v["total_krw"]
     pct_first  = (base_first / cost_first - 1) * 100 if cost_first > 0 else 0.0
     period_chg = pct - pct_first         # 기간 동안 수익률 변화폭

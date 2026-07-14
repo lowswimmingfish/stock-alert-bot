@@ -194,6 +194,19 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
     return header + briefing
 
 
+def _wait_for_network(timeout=60, interval=5):
+    """Block until DNS resolves or timeout (seconds)."""
+    import socket, time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            socket.getaddrinfo("api.telegram.org", 443)
+            return True
+        except OSError:
+            time.sleep(interval)
+    return False
+
+
 def main():
     # 08:20~08:40 ET 범위 밖이면 스킵 (중복 발송 방지, DST 자동 반영)
     now_et = datetime.now(pytz.timezone("America/New_York"))
@@ -210,7 +223,9 @@ def main():
         print("Pre-market briefing already sent today — skipping.")
         return
 
-    _mark_sent_today()
+    if not _wait_for_network():
+        print("Network unavailable after 60s — aborting (will retry next launchd fire)")
+        return
 
     config = load_config()
 
@@ -223,12 +238,14 @@ def main():
             config["telegram"]["chat_id"],
             f"🇺🇸 오늘({today_et.strftime('%m/%d')}) 미국 증시 휴장입니다.",
         )
+        _mark_sent_today()
         print(f"NYSE holiday ({today_et}) — holiday notice sent.")
         return
 
     # 미장 개장 전 브리핑만 전송 (리포트는 매일 8시 KST에 별도 발송)
     msg = build_premarket_briefing(config)
     send_telegram(config["telegram"]["bot_token"], config["telegram"]["chat_id"], msg)
+    _mark_sent_today()
     print(f"Pre-market briefing sent at {datetime.now(KST).strftime('%Y-%m-%d %H:%M')} KST")
 
 
