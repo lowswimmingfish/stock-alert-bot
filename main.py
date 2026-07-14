@@ -291,6 +291,22 @@ if __name__ == "__main__":
 
     scheduler = start_scheduler()
 
+    # 웹 대시보드 (데몬 스레드)
+    try:
+        import os
+        import threading
+        import uvicorn
+        from dashboard import app as dash_app
+
+        port = int(os.environ.get("PORT", 8080))
+        threading.Thread(
+            target=lambda: uvicorn.run(dash_app, host="0.0.0.0", port=port, log_level="warning"),
+            daemon=True,
+        ).start()
+        logger.info(f"Dashboard started on port {port}")
+    except Exception as e:
+        logger.error(f"Dashboard start error: {e}")
+
     # 봇 실행 (메인 스레드 블로킹)
     from bot import poll
     try:

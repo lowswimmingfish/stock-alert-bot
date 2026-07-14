@@ -40,19 +40,16 @@ def _load_snapshots() -> dict:
     global _snap_cache, _snap_cache_ts
     if _snap_cache is not None and (time.time() - _snap_cache_ts) < _SNAP_CACHE_TTL:
         return _snap_cache
-    if SNAPSHOTS_FILE.exists():
-        with open(SNAPSHOTS_FILE) as f:
-            _snap_cache = json.load(f)
-    else:
-        _snap_cache = {}
+    import storage
+    _snap_cache = storage.load_snapshots()
     _snap_cache_ts = time.time()
     return _snap_cache
 
 
 def _save_snapshots(data: dict):
     global _snap_cache, _snap_cache_ts
-    with open(SNAPSHOTS_FILE, "w") as f:
-        json.dump(data, f, indent=2, ensure_ascii=False)
+    import storage
+    storage.save_snapshots(data)
     _snap_cache = data
     _snap_cache_ts = time.time()
 
@@ -87,15 +84,15 @@ def take_snapshot() -> dict:
     data  = _load_snapshots()
     config = load_config()
 
-    # 환율
-    try:
-        fx_rate = yf.Ticker("USDKRW=X").fast_info.last_price or 1400
-    except Exception:
-        fx_rate = 1400
+    # 환율 (실패 시 캐시/1400 fallback)
+    from utils import get_usdkrw
+    fx_rate = get_usdkrw()["rate"]
 
     holdings = {}
     total_usd = 0.0
     kr_krw    = 0.0
+    cash_krw  = 0
+    cash_usd  = 0.0
 
     if kis_api.is_configured():
         # 해외
@@ -118,9 +115,16 @@ def take_snapshot() -> dict:
         except Exception as e:
             logger.warning(f"Snapshot US error: {e}")
 
+        # 예수금 (총 성과 계산에는 미포함 — 대시보드 표시용)
+        try:
+            cash_usd = kis_api.get_us_cash()
+        except Exception as e:
+            logger.warning(f"Snapshot US cash error: {e}")
+
         # 국내
         try:
             kr_raw = kis_api.get_kr_balance_raw()
+            cash_krw = kr_raw.get("total", {}).get("cash", 0)
             for h in kr_raw.get("holdings", []):
                 kr_krw += h.get("eval_amt", 0)
                 holdings[h["ticker"]] = {
@@ -150,10 +154,12 @@ def take_snapshot() -> dict:
     total_krw = round(total_usd * fx_rate + kr_krw)
 
     snapshot = {
-        "total_krw": total_krw,
+        "total_krw": total_krw,   # 주식 평가금만 (성과 계산 기준 — 현금 미포함)
         "total_usd": round(total_usd, 2),
         "kr_krw":    round(kr_krw),
         "fx_rate":   round(fx_rate, 2),
+        "cash_krw":  round(cash_krw),
+        "cash_usd":  round(cash_usd, 2),
         "holdings":  holdings,
     }
 

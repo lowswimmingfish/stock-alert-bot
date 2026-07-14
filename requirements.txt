@@ -11,3 +11,6 @@ matplotlib
 pandas
 numpy
 exchange_calendars
+psycopg2-binary
+fastapi
+uvicorn
