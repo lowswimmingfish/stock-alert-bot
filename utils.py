@@ -1,10 +1,48 @@
 #!/usr/bin/env python3
 """공통 유틸리티 함수."""
 
+import json
 import requests
 from datetime import date as _date
+from pathlib import Path
 
 _calendars: dict = {}
+
+_FX_CACHE_PATH = Path(__file__).parent / "fx_cache.json"
+FX_FALLBACK = 1400.0  # 환율 조회 불가 시 최후 기본값
+
+
+def get_usdkrw() -> dict:
+    """USD/KRW 환율 조회.
+
+    yfinance 실패 시 마지막 성공값(fx_cache.json), 그것도 없으면 FX_FALLBACK.
+    반환: {"rate": float, "prev_rate": float, "change_pct": float}
+    """
+    import yfinance as yf
+    try:
+        fi = yf.Ticker("USDKRW=X").fast_info
+        rate, prev = fi.last_price, fi.previous_close
+        if rate and rate > 0:
+            prev = prev if prev and prev > 0 else rate
+            result = {
+                "rate": round(rate, 2),
+                "prev_rate": round(prev, 2),
+                "change_pct": round((rate - prev) / prev * 100, 2),
+            }
+            try:
+                _FX_CACHE_PATH.write_text(json.dumps(result))
+            except Exception:
+                pass
+            return result
+    except Exception:
+        pass
+    try:
+        cached = json.loads(_FX_CACHE_PATH.read_text())
+        if cached.get("rate", 0) > 0:
+            return {"rate": cached["rate"], "prev_rate": cached["rate"], "change_pct": 0.0}
+    except Exception:
+        pass
+    return {"rate": FX_FALLBACK, "prev_rate": FX_FALLBACK, "change_pct": 0.0}
 
 
 def _get_calendar(name: str):

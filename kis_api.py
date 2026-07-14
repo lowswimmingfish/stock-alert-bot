@@ -213,6 +213,7 @@ def get_kr_balance() -> str:
             lines.append("")
             lines.append(f"국내 총평가: <b>{t['eval_amt']:,}원</b>")
             lines.append(f"국내 손익: <b>{t['profit']:+,}원 ({t['profit_pct']:+.1f}%)</b>")
+            lines.append(f"원화 예수금: <b>{t.get('cash', 0):,}원</b>")
         return "\n".join(lines)
     except Exception as e:
         logger.error(f"KIS 국내 잔고 오류: {e}")
@@ -258,6 +259,9 @@ def get_us_balance() -> str:
             lines.append("")
             lines.append(f"해외 총평가: <b>${total_eval:,.2f}</b>")
             lines.append(f"해외 손익: <b>${total_profit:+,.2f} ({pct_total:+.1f}%)</b>")
+        us_cash = get_us_cash()
+        if us_cash:
+            lines.append(f"달러 예수금: <b>${us_cash:,.2f}</b>")
         return "\n".join(lines), total_eval, total_profit
     except Exception as e:
         logger.error(f"KIS 해외 잔고 오류: {e}")
@@ -266,28 +270,30 @@ def get_us_balance() -> str:
 
 def get_full_balance() -> str:
     """국내 + 해외 잔고 통합 조회 (FX 환산 합계 포함)."""
-    import yfinance as yf
     kr_data = get_kr_balance_raw()
     kr_text = get_kr_balance()
     us_text, us_total_eval, us_total_profit = get_us_balance()
 
-    # FX 환율
-    try:
-        rate = yf.Ticker("USDKRW=X").fast_info.last_price or 1
-    except Exception:
-        rate = 1
+    # FX 환율 (실패 시 캐시/기본값 — rate=1이 되면 달러 자산이 합계에서 누락됨)
+    from utils import get_usdkrw
+    rate = get_usdkrw()["rate"]
 
     kr_eval   = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
     kr_profit = kr_data["total"].get("profit", 0)   if kr_data["total"] else 0
+    kr_cash   = kr_data["total"].get("cash", 0)     if kr_data["total"] else 0
+    us_cash   = get_us_cash()
 
-    total_krw        = kr_eval + us_total_eval * rate
+    total_stock_krw  = kr_eval + us_total_eval * rate
+    total_cash_krw   = kr_cash + us_cash * rate
     total_profit_krw = kr_profit + us_total_profit * rate
     pe = "📈" if total_profit_krw >= 0 else "📉"
 
     combined = (
         f"\n<b>💰 Total (원화 환산)</b>\n"
         f"  USD/KRW: {rate:,.0f}원\n"
-        f"  총 평가금: {total_krw:,.0f}원\n"
+        f"  주식 평가금: {total_stock_krw:,.0f}원\n"
+        f"  보유현금: {total_cash_krw:,.0f}원 (₩{kr_cash:,} + ${us_cash:,.2f})\n"
+        f"  총자산: <b>{total_stock_krw + total_cash_krw:,.0f}원</b>\n"
         f"  {pe} 총 손익: {total_profit_krw:+,.0f}원"
     )
     return f"{kr_text}\n\n{us_text}{combined}"
@@ -366,6 +372,7 @@ def get_kr_balance_raw() -> dict:
                 "profit":     profit,
                 "profit_pct": pct,
                 "invested":   invested,
+                "cash":       safe_int(o2.get("dnca_tot_amt", 0)),  # 원화 예수금
             }
         result = {"holdings": holdings, "total": total}
         _set_cached("kr_raw", result)
@@ -373,6 +380,39 @@ def get_kr_balance_raw() -> dict:
     except Exception as e:
         logger.error(f"KIS 국내 raw 잔고 오류: {e}")
         return {"holdings": [], "total": {}}
+
+
+def get_us_cash() -> float:
+    """해외(USD) 예수금 조회 (5분 캐시)."""
+    cached = _get_cached("us_cash")
+    if cached is not None:
+        return cached
+    try:
+        app_key, app_secret, account_no, account_cd = _get_credentials()
+        d = _get(
+            f"{BASE_URL}/uapi/overseas-stock/v1/trading/inquire-present-balance",
+            "CTRP6504R",
+            {
+                "CANO": account_no, "ACNT_PRDT_CD": account_cd,
+                "WCRC_FRCR_DVSN_CD": "02", "NATN_CD": "840",
+                "TR_MKET_CD": "00", "INQR_DVSN_CD": "00",
+            },
+        )
+        if str(d.get("rt_cd", "0")) != "0":
+            logger.warning(f"KIS 해외 예수금 조회 오류: {d.get('msg1', '')}")
+            return 0.0
+        cash = 0.0
+        for cur in d.get("output2", []) or []:
+            if cur.get("crcy_cd") == "USD":
+                try:
+                    cash = float(str(cur.get("frcr_dncl_amt_2", 0)).replace(",", "") or 0)
+                except ValueError:
+                    cash = 0.0
+        _set_cached("us_cash", cash)
+        return cash
+    except Exception as e:
+        logger.error(f"KIS 해외 예수금 오류: {e}")
+        return 0.0
 
 
 def get_us_balance_raw() -> dict:

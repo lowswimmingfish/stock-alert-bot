@@ -9,9 +9,10 @@ import requests
 import anthropic
 import yfinance as yf
 from pykrx import stock as pykrx_stock
-from ddgs import DDGS
+from duckduckgo_search import DDGS
 from bs4 import BeautifulSoup
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timedelta
 from config_loader import load_config, save_config, DATA_DIR
@@ -27,9 +28,11 @@ MAX_HISTORY = 20       # 최대 저장 메시지 수
 PRICE_CACHE_TTL = 300  # 시세 캐시 유효시간 (초, 5분)
 
 logging.basicConfig(
-    filename=LOG_PATH,
     level=logging.INFO,
     format="%(asctime)s - %(message)s",
+    handlers=[
+        RotatingFileHandler(LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    ],
 )
 
 
@@ -1326,6 +1329,7 @@ def poll():
             break
         except Exception as e:
             logging.error(f"Error: {e}")
+            time.sleep(5)  # 네트워크 단절 시 에러 로그 폭주 방지
             continue
 
 

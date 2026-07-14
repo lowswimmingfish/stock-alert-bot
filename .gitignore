@@ -14,3 +14,9 @@ __pycache__/
 .DS_Store
 portfolio.json
 kis_token.json
+
+# 런타임 상태 파일 (Railway는 /data 볼륨 사용)
+snapshots.json
+daily_report_sent.json
+daily_report.lock
+fx_cache.json

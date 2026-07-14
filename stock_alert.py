@@ -111,20 +111,9 @@ USD/KRW: {fx['rate']} ({fx['change_pct']:+.2f}%)
 
 
 def get_exchange_rate():
-    """Fetch USD/KRW exchange rate (real-time via fast_info)."""
-    try:
-        fi = yf.Ticker("USDKRW=X").fast_info
-        rate = fi.last_price
-        prev = fi.previous_close
-        change_pct = (rate - prev) / prev * 100 if rate and prev else 0
-        return {
-            "rate": round(rate or 0, 2),
-            "prev_rate": round(prev or 0, 2),
-            "change_pct": round(change_pct, 2),
-        }
-    except Exception:
-        pass
-    return {"rate": 0, "prev_rate": 0, "change_pct": 0}
+    """Fetch USD/KRW exchange rate (실패 시 캐시/기본값 fallback — 절대 0 반환 안 함)."""
+    from utils import get_usdkrw
+    return get_usdkrw()
 
 
 def format_change(pct):
@@ -150,6 +139,7 @@ def build_message(config):
     # get_kr_balance_raw / get_us_balance_raw  →  동시 시작
     _kr_data_holder = [None]
     _us_data_holder = [None]
+    _us_cash_holder = [0.0]
 
     def _fetch_kr():
         if kis_api.is_configured():
@@ -159,18 +149,25 @@ def build_message(config):
         if kis_api.is_configured():
             _us_data_holder[0] = kis_api.get_us_balance_raw()
 
-    with ThreadPoolExecutor(max_workers=4) as ex:
-        f_idx = ex.submit(get_market_indices)
-        f_fx  = ex.submit(get_exchange_rate)
-        f_kr  = ex.submit(_fetch_kr)
-        f_us  = ex.submit(_fetch_us)
+    def _fetch_us_cash():
+        if kis_api.is_configured():
+            _us_cash_holder[0] = kis_api.get_us_cash()
+
+    with ThreadPoolExecutor(max_workers=5) as ex:
+        f_idx  = ex.submit(get_market_indices)
+        f_fx   = ex.submit(get_exchange_rate)
+        f_kr   = ex.submit(_fetch_kr)
+        f_us   = ex.submit(_fetch_us)
+        f_cash = ex.submit(_fetch_us_cash)
         indices = f_idx.result()
         fx      = f_fx.result()
         f_kr.result()
         f_us.result()
+        f_cash.result()
 
     kr_data = _kr_data_holder[0] or {"holdings": [], "total": {}}
     us_data = _us_data_holder[0] or {"holdings": [], "total": {}}
+    us_cash = _us_cash_holder[0]
 
     # ── 2단계: Claude 시황 요약 (indices 필요 → 직렬) ───────────────────
     market_summary = get_market_summary_ai(indices, fx, config)
@@ -232,6 +229,8 @@ def build_message(config):
             t = kr_data["total"]
             pe = "📈" if t.get("profit", 0) >= 0 else "📉"
             lines.append(f"  {pe} KR합계: {t.get('eval_amt', 0):,}원 | 손익 {t.get('profit', 0):+,}원 ({t.get('profit_pct', 0):+.1f}%)")
+            if t.get("cash"):
+                lines.append(f"  💵 원화 예수금: {t['cash']:,}원")
         lines.append("")
 
         # 해외주식 - yfinance fast_info로 실시간 가격 보정 (보유 종목 동시 조회)
@@ -240,7 +239,7 @@ def build_message(config):
         us_total_profit_usd = 0
         us_total_invested = 0
         us_total_fx_effect = 0
-        fx_rate = fx["rate"] or 1
+        fx_rate = fx["rate"]
         fx_prev = fx.get("prev_rate") or fx_rate
 
         def _fetch_us_price(h):
@@ -292,18 +291,24 @@ def build_message(config):
             total_us_profit_krw = us_total_profit_usd * fx_rate
             lines.append(f"  {pe} US합계: ${us_total_eval:,.2f} | 주가손익 ${us_total_profit_usd:+,.2f} ({pct_total:+.1f}%)")
             lines.append(f"       원화환산 {total_us_profit_krw:+,.0f}원 | 오늘 환율효과 {us_total_fx_effect:+,.0f}원")
+        if us_cash:
+            lines.append(f"  💵 달러 예수금: ${us_cash:,.2f} ≈ {us_cash * fx_rate:,.0f}원")
         lines.append("")
 
         # 전체 합산 (원화 환산) - yfinance 실시간 가격 기준
         kr_eval = kr_data["total"].get("eval_amt", 0) if kr_data["total"] else 0
         kr_profit = kr_data["total"].get("profit", 0) if kr_data["total"] else 0
+        kr_cash = kr_data["total"].get("cash", 0) if kr_data["total"] else 0
         total_krw = kr_eval + us_total_eval * fx_rate
+        total_cash_krw = kr_cash + us_cash * fx_rate
         us_stock_profit_krw = us_total_profit_usd * fx_rate
         total_profit_krw = kr_profit + us_stock_profit_krw
 
         pe = "📈" if total_profit_krw >= 0 else "📉"
         lines.append("<b>💰 Total (원화 환산)</b>")
-        lines.append(f"  총 평가금: {total_krw:,.0f}원")
+        lines.append(f"  주식 평가금: {total_krw:,.0f}원")
+        lines.append(f"  보유현금: {total_cash_krw:,.0f}원 (₩{kr_cash:,} + ${us_cash:,.2f})")
+        lines.append(f"  총자산: <b>{total_krw + total_cash_krw:,.0f}원</b>")
         lines.append(f"  {pe} 총 주가손익: {total_profit_krw:+,.0f}원")
         if us_data["holdings"] and abs(us_total_fx_effect) >= 100:
             lines.append(f"  💱 오늘 환율효과: {us_total_fx_effect:+,.0f}원 (₩{fx_rate:,.1f}, 전일비 {fx['change_pct']:+.2f}%)")
@@ -312,6 +317,19 @@ def build_message(config):
         lines.append("⚠️ KIS API 미연결 - 포트폴리오 데이터 없음")
 
     return "\n".join(lines)
+
+
+def _wait_for_network(timeout=60, interval=5):
+    """Block until DNS resolves or timeout (seconds)."""
+    import socket, time
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            socket.getaddrinfo("api.telegram.org", 443)
+            return True
+        except OSError:
+            time.sleep(interval)
+    return False
 
 
 def main():
@@ -323,22 +341,24 @@ def main():
         print("Daily report already sent today — skipping.")
         return
 
+    if not _wait_for_network():
+        print("Network unavailable after 60s — aborting (will retry next launchd fire)")
+        return
+
     config = load_config()
 
     # KRX 공휴일 체크
     from utils import is_kr_market_holiday
     today_kst = datetime.now(KST).date()
     if is_kr_market_holiday(today_kst):
-        _mark_sent_today()
         send_telegram(
             config["telegram"]["bot_token"],
             config["telegram"]["chat_id"],
             f"🎌 오늘({today_kst.strftime('%m/%d')}) 한국 증시 휴장입니다.",
         )
+        _mark_sent_today()
         print(f"KRX holiday ({today_kst}) — holiday notice sent.")
         return
-
-    _mark_sent_today()  # build 전에 먼저 기록 — 두 번째 프로세스가 동시에 시작해도 막힘
 
     # 포트폴리오 스냅샷 저장 (CAPM·성과차트용 일별 데이터 누적)
     try:
@@ -356,6 +376,7 @@ def main():
         msg,
     )
     if result.get("ok"):
+        _mark_sent_today()
         print("Alert sent successfully!")
     else:
         print(f"Failed to send: {result}")

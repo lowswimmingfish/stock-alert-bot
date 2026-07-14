@@ -11,6 +11,7 @@ import requests
 import anthropic
 import yfinance as yf
 from tavily import TavilyClient
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timedelta
 from config_loader import load_config, DATA_DIR
@@ -22,9 +23,11 @@ SEEN_PATH = DATA_DIR / "seen_news.json"
 LOG_PATH = Path(__file__).parent / "news_monitor.log"
 
 logging.basicConfig(
-    filename=LOG_PATH,
     level=logging.INFO,
     format="%(asctime)s - %(message)s",
+    handlers=[
+        RotatingFileHandler(LOG_PATH, maxBytes=10 * 1024 * 1024, backupCount=3, encoding="utf-8")
+    ],
 )
 
 HASH_TTL_DAYS   = 7   # 제목 해시 만료 (일)
