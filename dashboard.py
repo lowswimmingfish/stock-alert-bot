@@ -17,7 +17,7 @@ from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 import kis_api
 from utils import get_usdkrw
-from portfolio_tracker import _load_snapshots, _cost_krw
+from portfolio_tracker import _load_snapshots, _cost_krw, _asset_krw
 
 logger = logging.getLogger(__name__)
 
@@ -52,11 +52,12 @@ def api_overview(days: int = Query(default=90, ge=1, le=730), _=Depends(_auth)):
 
     # 수익률: 매입 원가(첫 스냅샷 환율로 고정) 대비 — 텔레그램 성과차트와 동일 기준
     ref_fx = filtered[0][1].get("fx_rate", 1400)
-    dates, stock_krw, return_pct = [], [], []
+    dates, stock_krw, asset_krw, return_pct = [], [], [], []
     for d, s in filtered:
         cost = _cost_krw(s, ref_fx=ref_fx)
         dates.append(d)
         stock_krw.append(s.get("total_krw", 0))
+        asset_krw.append(round(_asset_krw(s)))  # 총자산 (주식+현금)
         return_pct.append(round((s["total_krw"] / cost - 1) * 100, 2) if cost > 0 else 0.0)
 
     # 현재 상태 (KIS 5분 캐시, 실패 시 마지막 스냅샷)
@@ -110,6 +111,7 @@ def api_overview(days: int = Query(default=90, ge=1, le=730), _=Depends(_auth)):
     return {
         "dates": dates,
         "stock_krw": stock_krw,
+        "asset_krw": asset_krw,
         "return_pct": return_pct,
         "fx_rate": fx["rate"],
         "stock_total_krw": stock_total,
@@ -192,7 +194,7 @@ tr:last-child td { border-bottom: none; }
   <button data-d="730">전체</button>
 </div>
 
-<div class="card"><h2>주식 평가금 추이 (원)</h2><div class="chart-wrap"><canvas id="c-value"></canvas></div></div>
+<div class="card"><h2>총자산 추이 (원, 주식+현금)</h2><div class="chart-wrap"><canvas id="c-value"></canvas></div></div>
 <div class="card"><h2>수익률 추이 (%, 매입가+환율 고정 기준)</h2><div class="chart-wrap"><canvas id="c-return"></canvas></div></div>
 
 <div class="card"><h2>보유 종목</h2>
@@ -207,24 +209,28 @@ const css = k => getComputedStyle(document.documentElement).getPropertyValue(k).
 const krw = n => n == null ? "–" : Math.round(n).toLocaleString("ko-KR") + "원";
 let charts = {};
 
-function lineChart(id, labels, data, fmt) {
+function lineChart(id, labels, series, fmt) {
   if (charts[id]) charts[id].destroy();
+  const multi = series.length > 1;
   charts[id] = new Chart(document.getElementById(id), {
     type: "line",
-    data: { labels, datasets: [{
-      data, borderColor: css("--series-1"), borderWidth: 2,
-      pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: css("--series-1"),
+    data: { labels, datasets: series.map(s => ({
+      label: s.label, data: s.data,
+      borderColor: s.color, borderWidth: s.dashed ? 1.5 : 2,
+      borderDash: s.dashed ? [5, 4] : [],
+      pointRadius: 0, pointHoverRadius: 5, pointHoverBackgroundColor: s.color,
       tension: 0.15, fill: false,
-    }]},
+    }))},
     options: {
       responsive: true, maintainAspectRatio: false, animation: false,
       interaction: { mode: "index", intersect: false },
       plugins: {
-        legend: { display: false },
+        legend: { display: multi, labels: { color: css("--ink-2"), boxWidth: 16, boxHeight: 2 } },
         tooltip: {
           backgroundColor: css("--surface-1"), titleColor: css("--ink-2"),
           bodyColor: css("--ink-1"), borderColor: css("--border"), borderWidth: 1,
-          displayColors: false, callbacks: { label: ctx => fmt(ctx.parsed.y) },
+          displayColors: false,
+          callbacks: { label: ctx => (multi ? ctx.dataset.label + ": " : "") + fmt(ctx.parsed.y) },
         },
       },
       scales: {
@@ -254,9 +260,14 @@ async function load(days) {
   el.className = "v " + (ret >= 0 ? "up" : "down");
   document.getElementById("t-fx").textContent = "USD/KRW " + d.fx_rate.toLocaleString();
 
-  lineChart("c-value", d.dates, d.stock_krw,
-    v => (v / 10000).toLocaleString("ko-KR", { maximumFractionDigits: 0 }) + "만원");
-  lineChart("c-return", d.dates, d.return_pct, v => (+v).toFixed(2) + "%");
+  const fmt만 = v => (v / 10000).toLocaleString("ko-KR", { maximumFractionDigits: 0 }) + "만원";
+  const valueSeries = [{ label: "총자산", data: d.asset_krw, color: css("--series-1") }];
+  if (d.asset_krw.some((v, i) => v !== d.stock_krw[i]))
+    valueSeries.push({ label: "주식 평가금", data: d.stock_krw, color: css("--ink-muted"), dashed: true });
+  lineChart("c-value", d.dates, valueSeries, fmt만);
+  lineChart("c-return", d.dates,
+    [{ label: "수익률", data: d.return_pct, color: css("--series-1") }],
+    v => (+v).toFixed(2) + "%");
 
   const tb = document.querySelector("#holdings tbody");
   tb.innerHTML = "";

@@ -54,6 +54,19 @@ def _save_snapshots(data: dict):
     _snap_cache_ts = time.time()
 
 
+# ── 총자산 계산 헬퍼 ─────────────────────────────────────────────────────────
+
+def _asset_krw(snap: dict) -> float:
+    """총자산 = 주식 평가금 + 예수금(KRW+USD 환산).
+    현금 필드가 없는 과거 스냅샷은 주식 평가금만 반환 (당시 현금 미기록).
+    부분매도로 주식→현금 이동 시 총자산은 변하지 않아야 차트 왜곡이 없음.
+    """
+    fx = snap.get("fx_rate") or 1400
+    return (snap.get("total_krw") or 0) \
+        + (snap.get("cash_krw") or 0) \
+        + (snap.get("cash_usd") or 0.0) * fx
+
+
 # ── 매입 원가 계산 헬퍼 ──────────────────────────────────────────────────────
 
 def _cost_krw(snap: dict, ref_fx: float = None) -> float:
@@ -154,7 +167,7 @@ def take_snapshot() -> dict:
     total_krw = round(total_usd * fx_rate + kr_krw)
 
     snapshot = {
-        "total_krw": total_krw,   # 주식 평가금만 (성과 계산 기준 — 현금 미포함)
+        "total_krw": total_krw,   # 주식 평가금만 (매입가 기준 수익률 계산용)
         "total_usd": round(total_usd, 2),
         "kr_krw":    round(kr_krw),
         "fx_rate":   round(fx_rate, 2),
@@ -162,15 +175,18 @@ def take_snapshot() -> dict:
         "cash_usd":  round(cash_usd, 2),
         "holdings":  holdings,
     }
+    snapshot["asset_krw"] = round(_asset_krw(snapshot))  # 총자산 (주식+현금)
 
-    # ── 이상값 방어: 직전 스냅샷 대비 40% 이상 급락이면 저장 안 함 ──
+    # ── 이상값 방어: 직전 스냅샷 대비 총자산 40% 이상 급락이면 저장 안 함 ──
+    # (주식만 비교하면 부분매도→현금 이동이 급락으로 오탐됨)
     prev_snaps = sorted(data.items(), key=lambda x: x[0])
     if prev_snaps:
-        prev_total = prev_snaps[-1][1].get("total_krw", 0)
-        if prev_total > 0 and total_krw < prev_total * 0.6:
+        prev_asset = _asset_krw(prev_snaps[-1][1])
+        curr_asset = snapshot["asset_krw"]
+        if prev_asset > 0 and curr_asset < prev_asset * 0.6:
             logger.warning(
-                f"Snapshot anomaly: {today} total_krw={total_krw:,.0f} "
-                f"vs prev {prev_total:,.0f} ({total_krw/prev_total*100:.1f}%) — skipping save"
+                f"Snapshot anomaly: {today} asset_krw={curr_asset:,.0f} "
+                f"vs prev {prev_asset:,.0f} ({curr_asset/prev_asset*100:.1f}%) — skipping save"
             )
             return snapshot  # 반환은 하되 저장 안 함
 
@@ -396,8 +412,9 @@ def calc_mdd(days: int = 365) -> dict:
     today = date.today()
     start = today - timedelta(days=days)
 
+    # 총자산 기준 — 부분매도(주식→현금)가 낙폭으로 잡히지 않도록
     filtered = sorted(
-        [(date.fromisoformat(d), v["total_krw"]) for d, v in data.items()
+        [(date.fromisoformat(d), _asset_krw(v)) for d, v in data.items()
          if start <= date.fromisoformat(d) <= today],
         key=lambda x: x[0],
     )
@@ -627,7 +644,8 @@ def calc_capm_metrics(days: int = 90) -> dict:
         return {}
 
     dates  = [d for d, _ in filtered]
-    values = np.array([v["total_krw"] for _, v in filtered], dtype=float)
+    # 총자산 기준 — 부분매도일이 가짜 급락 수익률로 잡히지 않도록
+    values = np.array([_asset_krw(v) for _, v in filtered], dtype=float)
 
     # 일별 포트폴리오 수익률
     port_ret = np.diff(values) / values[:-1]
@@ -862,15 +880,25 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
                  color="#cccccc", fontsize=8, ha="right", va="bottom",
                  bbox=dict(facecolor="#1a1a2e", alpha=0.7, edgecolor="#444444", boxstyle="round,pad=0.4"))
 
-    # 하단: 절대 평가금액 (만원), y축은 데이터 범위에 맞게 zoom
-    vals_만 = [v / 1e4 for v in values]
-    ax2.plot(dates, vals_만, color="#00a8ff", linewidth=2)
-    _min, _max = min(vals_만), max(vals_만)
+    # 하단: 총자산 (주식+현금, 만원) — 부분매도해도 현금이 포함돼 왜곡 없음
+    assets = [_asset_krw(snap) for _, snap in filtered]
+    assets_만 = [a / 1e4 for a in assets]
+    vals_만   = [v / 1e4 for v in values]
+    has_cash  = any(a != v for a, v in zip(assets, values))
+
+    ax2.plot(dates, assets_만, color="#00a8ff", linewidth=2, label="총자산", zorder=3)
+    _min, _max = min(assets_만), max(assets_만)
+    if has_cash:
+        ax2.plot(dates, vals_만, color="#888888", linewidth=1.2,
+                 linestyle="--", label="주식 평가금", zorder=2)
+        _min, _max = min(_min, min(vals_만)), max(_max, max(vals_만))
+        ax2.legend(facecolor="#1a1a2e", labelcolor="white", fontsize=8,
+                   framealpha=0.8, loc="upper left")
     _margin = (_max - _min) * 0.25 or _max * 0.01
     ax2.set_ylim(_min - _margin, _max + _margin)
-    ax2.fill_between(dates, vals_만, _min - _margin, alpha=0.12, color="#00a8ff")
+    ax2.fill_between(dates, assets_만, _min - _margin, alpha=0.12, color="#00a8ff")
     ax2.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{x:,.0f}만"))
-    ax2.set_ylabel("평가금액", color="#aaaaaa", fontsize=10)
+    ax2.set_ylabel("총자산 (주식+현금)", color="#aaaaaa", fontsize=10)
 
     # 수익 요약 텍스트 (매입가 기준 현재 수익률)
     total_pct  = pct_returns[-1]
@@ -959,8 +987,11 @@ def get_performance_summary(days: int = 30) -> str:
         f"평가손익: <b>{sign}{gain / 1e4:,.1f}만원</b>",
         f"현재 평가금: {curr / 1e4:,.0f}만원",
         f"매입 원가:   {cost / 1e4:,.0f}만원",
-        "",
     ]
+    asset = _asset_krw(last_v)
+    if asset != curr:  # 현금이 기록된 스냅샷이면 총자산도 표시
+        lines.append(f"총자산(현금 포함): {asset / 1e4:,.0f}만원")
+    lines.append("")
 
     # 보유 종목별 개별 수익률
     if kis_api.is_configured():
