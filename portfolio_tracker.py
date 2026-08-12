@@ -30,6 +30,18 @@ KST = pytz.timezone("Asia/Seoul")
 SNAPSHOTS_FILE = DATA_DIR / "snapshots.json"
 
 
+def _kst_today() -> date:
+    """KST 기준 오늘 날짜.
+
+    Railway 컨테이너는 UTC로 돈다. 스냅샷 잡은 KST 06:05에 실행되는데
+    그 시각은 UTC로 전날 21:05이라 date.today()를 쓰면 날짜가 하루씩
+    밀린다 — 월요일 실행분이 일요일로 저장되고 금요일 키는 영영 생기지
+    않았다 (2026-07-14 Railway 이전 후 발생). 날짜를 다루는 모든 지점은
+    이 함수를 쓴다.
+    """
+    return datetime.now(KST).date()
+
+
 # ── 스냅샷 저장/로드 (30초 인메모리 캐시 — 같은 요청 내 4~5번 중복 파일 I/O 방지) ──────
 
 _snap_cache: dict | None = None
@@ -112,7 +124,7 @@ def _cost_krw(snap: dict, ref_fx: float = None) -> float:
 
 def take_snapshot() -> dict:
     """현재 포트폴리오 상태를 스냅샷으로 저장하고 반환."""
-    today = str(date.today())
+    today = str(_kst_today())
     data  = _load_snapshots()
     config = load_config()
 
@@ -292,7 +304,7 @@ def backfill_snapshots(days: int = 90) -> int:
         logger.warning("Backfill: 보유 종목 없음")
         return 0
 
-    today = date.today()
+    today = _kst_today()
     start = today - timedelta(days=days)
 
     # 환율 히스토리
@@ -477,7 +489,7 @@ def calc_mdd(days: int = 365) -> dict:
     if len(data) < 2:
         return {}
 
-    today = date.today()
+    today = _kst_today()
     start = today - timedelta(days=days)
 
     # 총자산 기준 — 부분매도(주식→현금)가 낙폭으로 잡히지 않도록
@@ -541,7 +553,7 @@ def calc_stock_contribution(days: int = 30) -> list[dict]:
     if len(data) < 2:
         return []
 
-    today = date.today()
+    today = _kst_today()
     start = today - timedelta(days=days)
 
     filtered = sorted(
@@ -757,7 +769,7 @@ def calc_capm_metrics(days: int = 90) -> dict:
     if len(data) < 7:
         return {}
 
-    today = date.today()
+    today = _kst_today()
     start = today - timedelta(days=days)
 
     filtered = sorted(
@@ -926,7 +938,7 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
     if not data:
         raise ValueError("스냅샷 데이터가 없어요. 매일 자동 저장되니 내일부터 확인 가능합니다.")
 
-    today = date.today()
+    today = _kst_today()
     start = today - timedelta(days=days)
 
     filtered = sorted(
@@ -1121,7 +1133,7 @@ def get_performance_summary(days: int = 30) -> str:
     if len(data) < 2:
         return "📊 아직 데이터가 부족해요. 매일 자동 저장되니 내일 다시 확인해주세요!"
 
-    today = date.today()
+    today = _kst_today()
     start = today - timedelta(days=days)
 
     filtered = sorted(

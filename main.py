@@ -46,7 +46,10 @@ def run_snapshot():
         import datetime as dt
         from utils import is_us_market_holiday
         now_et = dt.datetime.now(ET)
-        if now_et.weekday() >= 5:  # 토(5)/일(6) — 시장 휴장
+        # 주말 판정은 KST 기준 — 이 잡은 KST 평일 06:05에 뜨는데 그 시각은
+        # ET로 전날 17:05이라, ET 요일로 보면 KST 월요일분이 'ET 일요일'로
+        # 걸려서 통째로 스킵됐다. NYSE 휴장 판정만 ET 기준을 유지한다.
+        if dt.datetime.now(KST).weekday() >= 5:
             return
         if is_us_market_holiday(now_et.date()):
             logger.info(f"Snapshot skipped: NYSE holiday ({now_et.date()})")

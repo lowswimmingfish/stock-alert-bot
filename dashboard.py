@@ -45,7 +45,10 @@ def api_overview(days: int = Query(default=90, ge=1, le=730), _=Depends(_auth)):
     if not snaps:
         return JSONResponse({"dates": [], "holdings": []})
 
-    cutoff = str(date.today() - timedelta(days=days))
+    # 스냅샷 키가 KST 날짜이므로 창 기준도 KST — UTC로 자르면 자정 부근에
+    # 하루가 밀린다 (컨테이너는 UTC)
+    from portfolio_tracker import _kst_today
+    cutoff = str(_kst_today() - timedelta(days=days))
     filtered = sorted((d, s) for d, s in snaps.items() if d >= cutoff)
     if not filtered:
         filtered = sorted(snaps.items())[-1:]
