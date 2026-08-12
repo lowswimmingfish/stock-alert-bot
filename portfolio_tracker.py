@@ -126,6 +126,10 @@ def take_snapshot() -> dict:
     cash_krw  = 0
     cash_usd  = 0.0
 
+    # 조회 성공 여부 — 한쪽이 실패했는데도 저장하면 반쪽짜리 스냅샷이
+    # 그대로 -20% 수익률로 잡힌다 (2026-06-12, 06-17 사례)
+    us_ok = kr_ok = True
+
     if kis_api.is_configured():
         # 해외
         try:
@@ -145,6 +149,7 @@ def take_snapshot() -> dict:
                     "value_usd": round(value, 2),
                 }
         except Exception as e:
+            us_ok = False
             logger.warning(f"Snapshot US error: {e}")
 
         # 예수금 (총 성과 계산에는 미포함 — 대시보드 표시용)
@@ -166,6 +171,7 @@ def take_snapshot() -> dict:
                     "value_krw": h.get("eval_amt", 0),
                 }
         except Exception as e:
+            kr_ok = False
             logger.warning(f"Snapshot KR error: {e}")
     else:
         # fallback: portfolio.json + yfinance
@@ -196,11 +202,54 @@ def take_snapshot() -> dict:
     }
     snapshot["asset_krw"] = round(_asset_krw(snapshot))  # 총자산 (주식+현금)
 
-    # ── 이상값 방어: 직전 스냅샷 대비 총자산 40% 이상 급락이면 저장 안 함 ──
-    # (주식만 비교하면 부분매도→현금 이동이 급락으로 오탐됨)
     prev_snaps = sorted(data.items(), key=lambda x: x[0])
-    if prev_snaps:
-        prev_asset = _asset_krw(prev_snaps[-1][1])
+    prev_snap  = prev_snaps[-1][1] if prev_snaps else None
+
+    # ── 방어 ①: 조회 실패로 한쪽이 통째로 빠진 반쪽 스냅샷 ──
+    # 직전엔 있던 종목군이 '조회 예외' 때문에 사라졌다면 저장하지 않는다.
+    # 실제 전량매도(조회는 성공, 종목 0개)는 정상 저장돼야 하므로 예외 발생
+    # 여부로만 판단한다.
+    if prev_snap:
+        def _leg_counts(snap):
+            hs = snap.get("holdings", {}) or {}
+            us = sum(1 for h in hs.values() if "value_usd" in h)
+            return us, len(hs) - us
+
+        prev_us, prev_kr = _leg_counts(prev_snap)
+        curr_us, curr_kr = _leg_counts(snapshot)
+        missing = []
+        if not us_ok and prev_us > 0 and curr_us < prev_us:
+            missing.append(f"US {prev_us}→{curr_us}")
+        if not kr_ok and prev_kr > 0 and curr_kr < prev_kr:
+            missing.append(f"KR {prev_kr}→{curr_kr}")
+        if missing:
+            logger.warning(
+                f"Snapshot partial fetch: {today} ({', '.join(missing)}) — skipping save"
+            )
+            return snapshot  # 반환은 하되 저장 안 함
+
+    # ── 방어 ②: 종목이 줄었는데 총자산도 같이 급감한 경우 ──
+    # 예외 없이 빈 목록이 오는 soft failure를 잡는다. 진짜 매도라면 대금이
+    # 예수금으로 들어와 총자산은 유지되므로, 종목 감소 + 총자산 15% 이상
+    # 급감은 조회 누락으로 본다. 양쪽 다 예수금이 기록된 경우에만 적용.
+    if prev_snap and _has_cash_fields(prev_snap) and _has_cash_fields(snapshot):
+        prev_n = len(prev_snap.get("holdings", {}) or {})
+        curr_n = len(snapshot.get("holdings", {}) or {})
+        prev_asset = _asset_krw(prev_snap)
+        curr_asset = snapshot["asset_krw"]
+        if (curr_n < prev_n and prev_asset > 0
+                and curr_asset < prev_asset * 0.85):
+            logger.warning(
+                f"Snapshot holdings shrank without cash offset: {today} "
+                f"종목 {prev_n}→{curr_n}, asset {prev_asset:,.0f}→{curr_asset:,.0f} "
+                f"({curr_asset/prev_asset*100:.1f}%) — skipping save"
+            )
+            return snapshot  # 반환은 하되 저장 안 함
+
+    # ── 방어 ③: 직전 스냅샷 대비 총자산 40% 이상 급락이면 저장 안 함 ──
+    # (주식만 비교하면 부분매도→현금 이동이 급락으로 오탐됨)
+    if prev_snap:
+        prev_asset = _asset_krw(prev_snap)
         curr_asset = snapshot["asset_krw"]
         if prev_asset > 0 and curr_asset < prev_asset * 0.6:
             logger.warning(
