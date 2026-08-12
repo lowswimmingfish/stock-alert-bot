@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """포트폴리오 일별 스냅샷 저장 + 성과 차트 생성."""
 
+import bisect
 import io
 import json
 import logging
@@ -56,15 +57,33 @@ def _save_snapshots(data: dict):
 
 # ── 총자산 계산 헬퍼 ─────────────────────────────────────────────────────────
 
-def _asset_krw(snap: dict) -> float:
+def _asset_krw(snap: dict, include_cash: bool = True) -> float:
     """총자산 = 주식 평가금 + 예수금(KRW+USD 환산).
     현금 필드가 없는 과거 스냅샷은 주식 평가금만 반환 (당시 현금 미기록).
     부분매도로 주식→현금 이동 시 총자산은 변하지 않아야 차트 왜곡이 없음.
+    include_cash=False면 예수금을 빼고 주식 평가금만 반환 (기준 통일용).
     """
+    if not include_cash:
+        return snap.get("total_krw") or 0
     fx = snap.get("fx_rate") or 1400
     return (snap.get("total_krw") or 0) \
         + (snap.get("cash_krw") or 0) \
         + (snap.get("cash_usd") or 0.0) * fx
+
+
+def _has_cash_fields(snap: dict) -> bool:
+    return snap.get("cash_krw") is not None or snap.get("cash_usd") is not None
+
+
+def _asset_series(snaps: list) -> tuple:
+    """수익률 계산용 총자산 시계열. (values, cash_included)
+
+    예수금 기록은 2026-07-14부터 시작됨 — 기록 있는 날과 없는 날이 한 창에 섞이면
+    경계일에 예수금 규모만큼 가짜 급등/급락이 생긴다(7/14 +14%, 7/20 -11%).
+    창 안에서 기준이 섞이면 주식 평가금만으로 통일한다.
+    """
+    include = all(_has_cash_fields(s) for s in snaps)
+    return [_asset_krw(s, include) for s in snaps], include
 
 
 # ── 매입 원가 계산 헬퍼 ──────────────────────────────────────────────────────
@@ -563,11 +582,14 @@ def _calc_stock_beta(yf_ticker: str, benchmark: str, period: str = "2y") -> Opti
         return None
 
 
-def _portfolio_beta_from_holdings(snap: dict, fx_rate: float) -> Optional[float]:
+def _portfolio_beta_from_holdings(snap: dict, fx_rate: float) -> Optional[dict]:
     """
     보유 종목별 2년치 히스토리로 개별 베타를 구한 뒤 시장가치 비중으로 가중합산.
     - 미국 주식: S&P 500 (^GSPC) 기준
     - 한국 주식: KOSDAQ (^KQ11) 우선, 실패 시 KOSPI (^KS11) fallback
+
+    반환: {"beta": float, "us_weight": float} — us_weight는 알파 계산 시
+    벤치마크를 동일한 비중으로 블렌딩하기 위해 함께 돌려준다.
     """
     holdings = snap.get("holdings", {})
     if not holdings:
@@ -615,18 +637,72 @@ def _portfolio_beta_from_holdings(snap: dict, fx_rate: float) -> Optional[float]
 
     # 커버 안 된 비중은 베타 1.0 (시장 평균) 가정
     portfolio_beta += (1.0 - covered_weight) * 1.0
-    return round(portfolio_beta, 3)
+    us_weight = sum(i["value_krw"] for i in items if i["is_us"]) / total_value
+    return {"beta": round(portfolio_beta, 3), "us_weight": us_weight}
+
+
+# 외부 현금흐름/데이터 결손 판정 임계치
+# 하루 절대변동이 크면서 '시장으로 설명 안 되는' 잔차까지 큰 날만 끊는다.
+# (실제 시장 급락일은 잔차가 작으므로 그대로 유지됨)
+_FLOW_ABS_THRESHOLD   = 0.08   # 일수익률 절대값 8%
+_FLOW_RESID_THRESHOLD = 0.05   # 시장 대비 잔차 5%
+# 연율 알파를 표시해도 되는 최소 관측 기간 (일)
+_ANNUAL_ALPHA_MIN_DAYS = 120
+
+
+def _fetch_index_returns(symbol: str, dates: list, period_days: int) -> Optional[list]:
+    """dates의 인접 쌍마다 지수 수익률을 반환. 종가가 없는 날은 직전 거래일 종가 사용.
+
+    스냅샷은 일~목에 저장되는데 일요일엔 지수 종가가 없다. 날짜를 정확히
+    매칭하면 일요일과 (일→월) 쌍이 통째로 버려져 주당 2일씩 날아간다.
+    '해당일 이하의 마지막 종가'로 찾으면 체인이 끊기지 않는다.
+    """
+    try:
+        hist = yf.Ticker(symbol).history(period=f"{period_days}d")
+        if hist.empty:
+            return None
+        px = {}
+        for idx, row in hist.iterrows():
+            d = idx.date() if hasattr(idx, "date") else idx
+            px[d] = row["Close"]
+        idx_dates = sorted(px)
+
+        def close_on_or_before(d):
+            i = bisect.bisect_right(idx_dates, d) - 1
+            return px[idx_dates[i]] if i >= 0 else None
+
+        out = []
+        for i in range(1, len(dates)):
+            pa = close_on_or_before(dates[i - 1])
+            pb = close_on_or_before(dates[i])
+            out.append((pb / pa) - 1 if (pa and pb) else None)
+        return out
+    except Exception as e:
+        logger.warning(f"Index fetch error {symbol}: {e}")
+        return None
+
+
+def _fx_series(snaps: list) -> list:
+    """스냅샷의 환율 시계열. 조회 실패 fallback(1400)이나 비정상 점프는 직전값 유지."""
+    out, prev = [], None
+    for s in snaps:
+        f = s.get("fx_rate") or 0
+        if not f or (prev and abs(f / prev - 1) > 0.03):
+            f = prev or 1400
+        out.append(f)
+        prev = f
+    return out
 
 
 def calc_capm_metrics(days: int = 90) -> dict:
     """
     포트폴리오의 CAPM 지표를 계산합니다.
-    - beta: 시장(S&P500) 대비 민감도
-    - alpha: Jensen's Alpha (초과수익)
-    - sharpe: 샤프 비율
-    - treynor: 트레이너 비율
-    - expected_return: CAPM 기대수익률 (연율화)
-    - actual_return: 실제 연율화 수익률
+    - beta: 시장 대비 민감도 (종목별 2년 히스토리 가중합)
+    - alpha: Jensen's Alpha — 기간 기준이 기본값. 연율 알파는 관측기간이
+      180일 이상일 때만 산출한다 (짧은 창을 연율화하면 알파가 수백 %로 튐).
+    - sharpe / treynor
+    벤치마크는 포트폴리오와 동일한 원화 기준으로 맞춘다:
+      w_us × (S&P500 원화환산) + w_kr × KOSDAQ
     """
     data = _load_snapshots()
     if len(data) < 7:
@@ -643,110 +719,153 @@ def calc_capm_metrics(days: int = 90) -> dict:
     if len(filtered) < 7:
         return {}
 
-    dates  = [d for d, _ in filtered]
-    # 총자산 기준 — 부분매도일이 가짜 급락 수익률로 잡히지 않도록
-    values = np.array([_asset_krw(v) for _, v in filtered], dtype=float)
+    dates = [d for d, _ in filtered]
+    snaps = [v for _, v in filtered]
 
-    # 일별 포트폴리오 수익률
+    # 총자산 기준 — 부분매도일이 가짜 급락 수익률로 잡히지 않도록.
+    # 창 안에 예수금 기록 유무가 섞이면 주식 평가금 기준으로 통일한다.
+    values, cash_included = _asset_series(snaps)
+    values = np.array(values, dtype=float)
+    if (values[:-1] <= 0).any():
+        return {}
     port_ret = np.diff(values) / values[:-1]
 
-    # S&P500 일별 수익률
-    try:
-        period = f"{days + 20}d"
-        hist = yf.Ticker("^GSPC").history(period=period)
-        if hist.empty:
-            return {}
+    # ── 베타 계산: 종목별 2년치 히스토리 가중합 ──
+    # 스냅샷 기간이 짧아도 안정적인 베타를 얻기 위해 개별 종목 장기 히스토리 사용.
+    # 미국 종목 → S&P500 기준 / 한국 종목 → KOSDAQ(KOSPI) 기준으로 각각 계산 후 비중 합산.
+    latest_snap = snaps[-1]
+    snap_fx = latest_snap.get("fx_rate", 1400)
+    beta_info   = _portfolio_beta_from_holdings(latest_snap, snap_fx)
+    beta        = beta_info["beta"] if beta_info else None
+    us_weight   = beta_info["us_weight"] if beta_info else 1.0
+    beta_source = "history" if beta_info else "snapshot"
 
-        sp_prices = {}
-        for idx, row in hist.iterrows():
-            d = idx.date() if hasattr(idx, "date") else idx
-            sp_prices[d] = row["Close"]
+    # ── 벤치마크: 포트폴리오와 같은 원화 기준으로 맞춤 ──
+    # 포트폴리오 수익률은 원화 표시(환율 변동 포함)인데 S&P500만 쓰면
+    # 원/달러 변동분이 통째로 알파에 섞인다. 달러 지수는 원화 환산하고,
+    # 한국 비중은 KOSDAQ으로 블렌딩한다 (베타를 뽑은 기준과 동일).
+    sp_ret = _fetch_index_returns("^GSPC", dates, days + 20)
+    if sp_ret is None:
+        return {}
+    kq_ret = _fetch_index_returns("^KQ11", dates, days + 20)
+    if kq_ret is None:
+        kq_ret = _fetch_index_returns("^KS11", dates, days + 20)
 
-        sp_ret_list = []
-        for i in range(1, len(dates)):
-            d_prev, d_curr = dates[i - 1], dates[i]
-            if d_prev in sp_prices and d_curr in sp_prices:
-                sp_ret_list.append((sp_prices[d_curr] / sp_prices[d_prev]) - 1)
-            else:
-                sp_ret_list.append(None)
+    fx = _fx_series(snaps)
+    mkt_list, mkt_basis = [], "blended"
+    if kq_ret is None:
+        mkt_basis = "sp500_krw"   # KOSDAQ 조회 실패 → S&P500(원화) 단독
+    for i, sp in enumerate(sp_ret):
+        if sp is None:
+            mkt_list.append(None)
+            continue
+        fx_ret = fx[i + 1] / fx[i] - 1
+        sp_krw = (1 + sp) * (1 + fx_ret) - 1
+        kq = kq_ret[i] if kq_ret else None
+        if kq is None:
+            mkt_list.append(sp_krw)
+        else:
+            mkt_list.append(us_weight * sp_krw + (1 - us_weight) * kq)
 
-        # None이 너무 많으면 포기
-        valid = [(p, m) for p, m in zip(port_ret, sp_ret_list) if m is not None]
-        if len(valid) < 7:
-            return {}
+    # ── 외부 현금흐름·데이터 결손 제거 (TWR 링크 끊기) ──
+    # 입출금이나 보유종목 조회 누락은 수익률이 아니다. 변동이 크면서
+    # 시장으로 설명되지 않는 구간은 체인에서 제외하고 나머지만 연결한다.
+    kept, excluded = [], []
+    for i, (p, m) in enumerate(zip(port_ret, mkt_list)):
+        if m is None:
+            continue
+        if abs(p) > _FLOW_ABS_THRESHOLD and abs(p - m) > _FLOW_RESID_THRESHOLD:
+            excluded.append({"date": dates[i + 1].isoformat(), "ret_pct": round(p * 100, 2)})
+            continue
+        kept.append((p, m, dates[i], dates[i + 1]))
 
-        port_r = np.array([v[0] for v in valid])
-        mkt_r  = np.array([v[1] for v in valid])
-    except Exception as e:
-        logger.warning(f"CAPM S&P500 fetch error: {e}")
+    if len(kept) < 7:
         return {}
 
-    # 무위험 이자율 (미국 10년 국채, 일별로 환산)
+    port_r = np.array([k[0] for k in kept])
+    mkt_r  = np.array([k[1] for k in kept])
+    n_obs  = len(kept)
+    # 실제 경과일수 — 주말·휴일 갭과 제외 구간을 반영해야 연율화가 부풀지 않는다.
+    elapsed_days = sum((k[3] - k[2]).days for k in kept)
+    if elapsed_days <= 0:
+        return {}
+
+    # 무위험 이자율 (미국 10년 국채)
     try:
         tnx = yf.Ticker("^TNX").fast_info.last_price  # 연율 %
         rf_annual = (tnx or 4.3) / 100
     except Exception:
         rf_annual = 0.043  # fallback 4.3%
-    rf_daily = rf_annual / 252
 
-    # ── 베타 계산: 종목별 2년치 히스토리 가중합 ──
-    # 스냅샷 기간이 짧아도 안정적인 베타를 얻기 위해 개별 종목 장기 히스토리 사용.
-    # 미국 종목 → S&P500 기준 / 한국 종목 → KOSDAQ(KOSPI) 기준으로 각각 계산 후 비중 합산.
-    latest_snap = filtered[-1][1]
-    snap_fx = latest_snap.get("fx_rate", 1400)
-    beta = _portfolio_beta_from_holdings(latest_snap, snap_fx)
-    beta_source = "history"
-
-    if beta is None:
-        # 히스토리 계산 실패 시 스냅샷 기반 fallback
-        cov_matrix = np.cov(port_r, mkt_r)
-        beta = cov_matrix[0, 1] / cov_matrix[1, 1] if cov_matrix[1, 1] != 0 else 1.0
-        beta_source = "snapshot"
-
-    n_days = len(port_r)
-
-    # ── 기간 수익률 (기하평균 — 복리 기준, 올바른 방식) ──
-    # 산술평균 연율화((1+mean)^252)는 변동성이 클수록 부풀어 실제보다 과대 표시됨.
-    # 기하 총수익률을 먼저 구한 뒤 연율화해야 정확함.
-    total_port = float(np.prod(1 + port_r)) - 1      # 기간 내 실제 누적수익률
+    # ── 기간 수익률 (기하 — 복리 기준) ──
+    total_port = float(np.prod(1 + port_r)) - 1
     total_mkt  = float(np.prod(1 + mkt_r))  - 1
 
-    # ── 연율화 (기하) ──
-    actual_annual = (1 + total_port) ** (252 / n_days) - 1
-    mkt_annual    = (1 + total_mkt)  ** (252 / n_days) - 1
+    # ── 연율화: 거래일 수가 아니라 실제 경과일수 기준 ──
+    ann_exp       = 365 / elapsed_days
+    actual_annual = (1 + total_port) ** ann_exp - 1
+    mkt_annual    = (1 + total_mkt)  ** ann_exp - 1
+
+    # ── 베타 fallback (히스토리 실패 시 스냅샷 회귀) ──
+    if beta is None:
+        cov_matrix = np.cov(port_r, mkt_r)
+        beta = float(cov_matrix[0, 1] / cov_matrix[1, 1]) if cov_matrix[1, 1] != 0 else 1.0
 
     # ── CAPM 기대수익률 ──
-    # 단기 실현수익률을 연율화해 쓰면 시장 급락기에 -50%+ 이상한 값이 나옴.
-    # CAPM은 장기 기대수익률 모델 → ERP는 장기 평균(Damodaran ~5.5%) 사용.
+    # 두 가지를 구분해서 낸다:
+    #  (1) 장기 기대수익 — ERP는 장기 평균(Damodaran ~5.5%). "이 베타면 장기적으로
+    #      이 정도" 라는 모델값이며, 실적 평가 기준으로 쓰면 안 된다.
+    #  (2) Jensen's Alpha — 같은 기간의 '실현' 시장수익률로 벤치마킹한 교과서 정의.
+    #      (1)로 알파를 내면 시장이 빠진 구간에선 실력과 무관하게 항상 음수가 된다.
     ERP_LONGRUN = 0.055
     expected_annual = rf_annual + beta * ERP_LONGRUN
-    # 기간 환산 (n_days 기준, 연율과 비교 가능하도록)
-    expected_period = (1 + expected_annual) ** (n_days / 252) - 1
+    expected_period = (1 + expected_annual) ** (elapsed_days / 365) - 1
 
-    # ── Jensen's Alpha (연율 기준) ──
-    alpha = actual_annual - expected_annual
+    # ── Jensen's Alpha (기간 기준) ──
+    # 짧은 창의 실현수익률을 연율화해서 빼면 21거래일 +10%가 +212%로 증폭돼
+    # 알파가 노이즈가 된다. 기본은 기간 기준, 연율 알파는 관측기간이 충분할 때만.
+    long_enough  = elapsed_days >= _ANNUAL_ALPHA_MIN_DAYS
+    rf_period    = (1 + rf_annual) ** (elapsed_days / 365) - 1
+    capm_period  = rf_period + beta * (total_mkt - rf_period)   # 실현 기준 기대수익
+    alpha_period = total_port - capm_period
+    capm_annual  = (1 + capm_period) ** ann_exp - 1
+    alpha_annual = actual_annual - capm_annual if long_enough else None
 
-    # ── 샤프 비율 (연율화) ──
-    excess_ret = port_r - rf_daily
-    sharpe = (excess_ret.mean() / excess_ret.std() * np.sqrt(252)) if excess_ret.std() != 0 else 0.0
+    # ── 샤프 비율 (관측 빈도로 연율화) ──
+    periods_per_year = n_obs * 365 / elapsed_days
+    rf_per_obs = rf_annual / periods_per_year
+    excess_ret = port_r - rf_per_obs
+    sharpe = (excess_ret.mean() / excess_ret.std() * np.sqrt(periods_per_year)) \
+        if excess_ret.std() != 0 else 0.0
 
-    # ── 트레이너 비율 (연율화) ──
-    treynor = ((port_r.mean() - rf_daily) * 252) / beta if beta != 0 else 0.0
+    # ── 트레이너 비율 (연율, 기하 기준) ──
+    treynor = (actual_annual - rf_annual) / beta if beta != 0 else 0.0
 
     return {
         "beta":             round(float(beta), 3),
         "beta_source":      beta_source,   # "history" | "snapshot"
-        "alpha_pct":        round(float(alpha * 100), 2),
+        "alpha_pct":        round(float(alpha_period * 100), 2),   # 기간 기준 (기본)
+        "alpha_period_pct": round(float(alpha_period * 100), 2),
+        "alpha_annual_pct": (round(float(alpha_annual * 100), 2)
+                             if alpha_annual is not None else None),
         "sharpe":           round(float(sharpe), 3),
         "treynor_pct":      round(float(treynor * 100), 2),
         "actual_period_pct":   round(total_port * 100, 2),          # 기간 실제 수익률
-        "expected_period_pct": round(expected_period * 100, 2),     # 기간 CAPM 기대
-        "actual_pct":       round(float(actual_annual * 100), 2),   # 연율환산 (참고용)
-        "expected_pct":     round(float(expected_annual * 100), 2), # 연율 CAPM 기대
+        "capm_period_pct":     round(capm_period * 100, 2),         # 기간 CAPM 기대 (실현 시장 기준)
+        "expected_period_pct": round(expected_period * 100, 2),     # 기간 장기모델 기대 (ERP 5.5%)
+        "mkt_period_pct":      round(total_mkt * 100, 2),           # 기간 벤치마크
+        # 연율환산은 관측기간이 충분할 때만 — 짧은 창을 연율화하면 알파와 같은 이유로 폭주
+        "actual_pct":       (round(float(actual_annual * 100), 2) if long_enough else None),
+        "mkt_pct":          (round(float(mkt_annual * 100), 2)    if long_enough else None),
+        "expected_pct":     round(float(expected_annual * 100), 2), # 연율 CAPM 기대 (모델값)
         "rf_pct":           round(float(rf_annual * 100), 2),
-        "mkt_pct":          round(float(mkt_annual * 100), 2),
         "erp_pct":          round(ERP_LONGRUN * 100, 1),
-        "n_days":           n_days,
+        "n_days":           n_obs,
+        "elapsed_days":     elapsed_days,
+        "cash_basis":       "total" if cash_included else "stock_only",
+        "mkt_basis":        mkt_basis,
+        "us_weight_pct":    round(us_weight * 100, 1),
+        "excluded":         excluded,
     }
 
 
@@ -869,7 +988,10 @@ def build_performance_chart(days: int = 30) -> io.BytesIO:
     info_lines = []
     if capm:
         alpha_sign = "+" if capm["alpha_pct"] >= 0 else ""
-        info_lines.append(f"β={capm['beta']:.2f}  α={alpha_sign}{capm['alpha_pct']:.1f}%  Sharpe={capm['sharpe']:.2f}")
+        info_lines.append(
+            f"β={capm['beta']:.2f}  α={alpha_sign}{capm['alpha_pct']:.1f}%"
+            f"({capm['elapsed_days']}d)  Sharpe={capm['sharpe']:.2f}"
+        )
     if mdd_info:
         rec = mdd_info['recovery_pct']
         info_lines.append(f"MDD=-{mdd_info['mdd_pct']:.1f}%  회복={rec:.0f}%")
@@ -1076,8 +1198,11 @@ def get_performance_summary(days: int = 30) -> str:
             alpha_desc = "시장 기대치 하회 (부진)"
         else:
             alpha_desc = "시장 기대치 크게 하회 ⚠️"
-        lines.append(f"  알파(α):   {alpha_em} <b>{alpha_sign}{a:.2f}%</b>")
+        lines.append(f"  알파(α):   {alpha_em} <b>{alpha_sign}{a:.2f}%</b> "
+                     f"<i>({capm['elapsed_days']}일 초과수익)</i>")
         lines.append(f"             └ {alpha_desc}")
+        if capm.get("excluded"):
+            lines.append(f"             └ <i>입출금/결손 추정 {len(capm['excluded'])}일 제외</i>")
 
         # ── 샤프 비율 ──
         s = capm["sharpe"]
@@ -1098,15 +1223,21 @@ def get_performance_summary(days: int = 30) -> str:
         lines.append("")
         ap  = capm["actual_period_pct"]
         ep  = capm["expected_period_pct"]
-        aa  = capm["actual_pct"]
         ea  = capm["expected_pct"]
+        nd  = capm["elapsed_days"]
         ap_sign = "+" if ap >= 0 else ""
         ep_sign = "+" if ep >= 0 else ""
-        lines.append(f"  실제 수익률: <b>{ap_sign}{ap:.1f}%</b>  <i>({capm['n_days']}일 / 연율 {aa:+.1f}%)</i>")
-        lines.append(f"  CAPM 기대치: {ep_sign}{ep:.1f}%  <i>({capm['n_days']}일 / 연율 {ea:+.1f}%)</i>")
+        # 연율환산은 관측기간이 짧으면 폭주하므로 값이 있을 때만 표기
+        aa_txt = f" / 연율 {capm['actual_pct']:+.1f}%" if capm["actual_pct"] is not None else ""
+        mkt_lbl = "벤치마크(원화)" if capm.get("mkt_basis") == "blended" else "S&P500(원화)"
+        cp = capm["capm_period_pct"]
+        cp_sign = "+" if cp >= 0 else ""
+        lines.append(f"  실제 수익률: <b>{ap_sign}{ap:.1f}%</b>  <i>({nd}일{aa_txt})</i>")
+        lines.append(f"  CAPM 기대치: {cp_sign}{cp:.1f}%  <i>({nd}일 / β로 설명되는 몫)</i>")
         lines.append(
-            f"  <i>(Rf {capm['rf_pct']:.1f}% | ERP {capm['erp_pct']:.1f}% 장기평균"
-            f" | S&P500 최근 {capm['mkt_pct']:+.1f}% | {capm['n_days']}일 기준)</i>"
+            f"  <i>(Rf {capm['rf_pct']:.1f}% | {mkt_lbl} {capm['mkt_period_pct']:+.1f}%"
+            f" | 장기 기대 {ep_sign}{ep:.1f}% (연율 {ea:+.1f}%, ERP {capm['erp_pct']:.1f}%)"
+            f" | {nd}일 기준)</i>"
         )
 
     return "\n".join(lines)

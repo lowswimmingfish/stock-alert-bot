@@ -1257,21 +1257,41 @@ def process_update(update, config):
                 alpha_em   = "✅" if capm["alpha_pct"] >= 0 else "⚠️"
                 beta_em    = "🔴" if capm["beta"] > 1.2 else ("🟡" if capm["beta"] > 0.8 else "🟢")
                 sharpe_em  = "✅" if capm["sharpe"] > 1 else ("🟡" if capm["sharpe"] > 0 else "⚠️")
+                mkt_label  = ("벤치마크(원화)" if capm.get("mkt_basis") == "blended"
+                              else "S&P500(원화)")
+                _ann = lambda v: f"  <i>(연율환산 {v:+.1f}%)</i>" if v is not None else ""
+                alpha_ann  = capm.get("alpha_annual_pct")
+                alpha_tail = (f"  <i>(연율 {alpha_ann:+.1f}%)</i>" if alpha_ann is not None
+                              else "")
+                notes = []
+                if capm.get("cash_basis") == "stock_only":
+                    notes.append("예수금 기록이 없는 구간이 섞여 주식 평가금 기준으로 계산")
+                n_ex = len(capm.get("excluded") or [])
+                if n_ex:
+                    notes.append(f"입출금/데이터결손 추정 {n_ex}일 제외")
+                if alpha_ann is None:
+                    notes.append("관측기간이 짧아 연율환산은 생략 (120일 이상부터 표시)")
+                note_txt = ("\n\n<i>※ " + " · ".join(notes) + "</i>") if notes else ""
                 response = (
-                    f"📐 <b>CAPM 포트폴리오 분석</b> (최근 {capm['n_days']}거래일)\n\n"
+                    f"📐 <b>CAPM 포트폴리오 분석</b> "
+                    f"(관측 {capm['n_days']}회 / {capm['elapsed_days']}일)\n\n"
                     f"{beta_em} <b>베타(β)</b>: {capm['beta']:.3f}\n"
                     f"  시장보다 {'더 민감' if capm['beta'] > 1 else '덜 민감'}하게 움직임\n\n"
-                    f"<b>수익률 비교 ({capm['n_days']}일 기준)</b>\n"
-                    f"  실제 수익률:     {capm['actual_period_pct']:+.1f}%  <i>(연율환산 {capm['actual_pct']:+.1f}%)</i>\n"
-                    f"  CAPM 기대수익:  {capm['expected_period_pct']:+.1f}%  <i>(연율환산 {capm['expected_pct']:+.1f}%)</i>\n"
-                    f"  S&P500 최근:    {capm['mkt_pct']:+.1f}%  <i>(연율환산)</i>\n"
-                    f"  무위험이자율:    {capm['rf_pct']:.1f}%  |  ERP {capm['erp_pct']:.1f}% 장기평균\n\n"
-                    f"{alpha_em} <b>알파(α)</b>: {alpha_sign}{capm['alpha_pct']:.2f}%  <i>(연율 초과수익)</i>\n"
+                    f"<b>수익률 비교 ({capm['elapsed_days']}일 기준)</b>\n"
+                    f"  실제 수익률:     {capm['actual_period_pct']:+.1f}%{_ann(capm['actual_pct'])}\n"
+                    f"  CAPM 기대수익:  {capm['capm_period_pct']:+.1f}%  <i>(β로 설명되는 몫)</i>\n"
+                    f"  {mkt_label}:  {capm['mkt_period_pct']:+.1f}%{_ann(capm['mkt_pct'])}\n"
+                    f"  무위험이자율:    {capm['rf_pct']:.1f}%\n"
+                    f"  <i>참고 · 장기 기대수익 {capm['expected_period_pct']:+.1f}% "
+                    f"(연율 {capm['expected_pct']:+.1f}%, ERP {capm['erp_pct']:.1f}% 가정)</i>\n\n"
+                    f"{alpha_em} <b>알파(α)</b>: {alpha_sign}{capm['alpha_pct']:.2f}%  "
+                    f"<i>({capm['elapsed_days']}일 초과수익)</i>{alpha_tail}\n"
                     f"  {'시장 대비 초과수익 달성 중 🎉' if capm['alpha_pct'] >= 0 else '시장 기대치 하회 중'}\n\n"
                     f"{sharpe_em} <b>샤프 비율</b>: {capm['sharpe']:.3f}\n"
                     f"  (위험 1단위당 초과수익, 1 이상이면 우수)\n\n"
                     f"📊 <b>트레이너 비율</b>: {capm['treynor_pct']:.2f}%\n"
-                    f"  (베타 1단위당 초과수익)\n\n"
+                    f"  (베타 1단위당 초과수익)"
+                    f"{note_txt}\n\n"
                     f"<i>/capm 30  →  30일 기준으로 분석</i>"
                 )
         elif command == "/reset":
