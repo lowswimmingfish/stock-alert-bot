@@ -178,7 +178,7 @@ USD/KRW: {fx['rate']} ({'+' if fx['change_pct'] >= 0 else ''}{fx['change_pct']}%
 간결하고 실용적으로, 투자 판단에 도움이 되는 내용으로 써줘."""
 
     resp = client.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1200,
         messages=[{"role": "user", "content": prompt}],
     )

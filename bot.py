@@ -939,7 +939,7 @@ def ask_claude(question, config):
         for attempt in range(retries):
             try:
                 return client.messages.create(
-                    model="claude-sonnet-4-20250514",
+                    model="claude-sonnet-4-6",
                     max_tokens=1024,
                     system=system_prompt,
                     tools=TOOLS,

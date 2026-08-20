@@ -167,7 +167,7 @@ def run_earnings_consensus():
             )
 
             resp = claude.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-sonnet-4-6",
                 max_tokens=700,
                 messages=[{"role": "user", "content": f"""\
 {ticker} {quarter} 실적 발표가 내일({upcoming})이야.
@@ -244,7 +244,7 @@ def run_weekly_deep_analysis():
     context = "\n\n".join(stock_blocks + macro_blocks)
 
     resp = claude.messages.create(
-        model="claude-sonnet-4-20250514",
+        model="claude-sonnet-4-6",
         max_tokens=1800,
         messages=[{"role": "user", "content": f"""\
 {now_str} 주간 포트폴리오 심층 분석을 작성해줘.
