@@ -13,7 +13,7 @@ import pandas as pd
 import pytz
 import yfinance as yf
 from datetime import datetime, date, timedelta
-from tavily import TavilyClient
+from search_provider import search_news
 from config_loader import load_config
 from utils import send_telegram
 import kis_api
@@ -35,12 +35,9 @@ def _get_us_holdings(config):
             for s in config["portfolio"].get("us_stocks", [])]
 
 
-def _tavily_search(client, query, max_results=5):
-    try:
-        return client.search(query, max_results=max_results, topic="news").get("results", [])
-    except Exception as e:
-        logger.warning(f"Tavily search error: {e}")
-        return []
+def _tavily_search(tavily_key, query, max_results=5):
+    """Tavily 우선, 한도 초과 시 Google News. 결과는 title/content 키를 가진 dict 리스트."""
+    return search_news(query, max_results=max_results, tavily_key=tavily_key)
 
 
 # ── 1. 애널리스트 레이팅 변경 알림 ────────────────────────────────────────────
@@ -54,7 +51,7 @@ def run_analyst_alerts():
 
     bot_token = config["telegram"]["bot_token"]
     chat_id   = config["telegram"]["chat_id"]
-    tavily    = TavilyClient(api_key=tavily_key)
+    tavily    = tavily_key
     claude    = anthropic.Anthropic(api_key=config["anthropic_api_key"])
     holdings  = _get_us_holdings(config)
     today_str = datetime.now(KST).strftime("%Y-%m-%d")
@@ -115,7 +112,7 @@ def run_earnings_consensus():
 
     bot_token = config["telegram"]["bot_token"]
     chat_id   = config["telegram"]["chat_id"]
-    tavily    = TavilyClient(api_key=tavily_key)
+    tavily    = tavily_key
     claude    = anthropic.Anthropic(api_key=config["anthropic_api_key"])
     holdings  = _get_us_holdings(config)
 
@@ -213,7 +210,7 @@ def run_weekly_deep_analysis():
 
     bot_token = config["telegram"]["bot_token"]
     chat_id   = config["telegram"]["chat_id"]
-    tavily    = TavilyClient(api_key=tavily_key)
+    tavily    = tavily_key
     claude    = anthropic.Anthropic(api_key=config["anthropic_api_key"])
     holdings  = _get_us_holdings(config)
     now_str   = datetime.now(KST).strftime("%Y년 %m월 %d일")

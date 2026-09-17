@@ -10,7 +10,7 @@ import pytz
 import requests
 import anthropic
 import yfinance as yf
-from tavily import TavilyClient
+from search_provider import search_news
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from datetime import datetime, timedelta
@@ -161,27 +161,17 @@ def fetch_stock_news(ticker):
         return []
 
 
+def _to_items(results):
+    return [
+        {"title": r["title"], "link": r["url"], "summary": r["content"][:200], "pub_date": r["published_date"]}
+        for r in results
+    ]
+
+
 def fetch_stock_news_tavily(ticker, tavily_key):
-    """Tavily로 US 종목 뉴스 검색 (yfinance보다 최신·정확). 실패 시 yfinance fallback."""
-    try:
-        client = TavilyClient(api_key=tavily_key)
-        resp = client.search(f"{ticker} stock news", max_results=6, topic="news")
-        items = []
-        for r in resp.get("results", []):
-            title = r.get("title", "")
-            if title and isinstance(title, str):
-                items.append({
-                    "title":    title,
-                    "link":     r.get("url", ""),
-                    "summary":  r.get("content", "")[:200],
-                    "pub_date": r.get("published_date", ""),
-                })
-        if items:
-            return items
-    except Exception as e:
-        logging.warning(f"Tavily stock news error {ticker}: {e}")
-    # fallback
-    return fetch_stock_news(ticker)
+    """US 종목 뉴스: Tavily → (한도 초과 시) Google News → 결과 없으면 yfinance."""
+    items = _to_items(search_news(f"{ticker} stock news", max_results=6, tavily_key=tavily_key))
+    return items or fetch_stock_news(ticker)
 
 
 def fetch_kr_news(ticker, name):
@@ -210,23 +200,7 @@ def fetch_kr_news(ticker, name):
 
 
 def fetch_market_topic_news(topic, tavily_key):
-    try:
-        client = TavilyClient(api_key=tavily_key)
-        resp = client.search(topic["query"], max_results=5, topic="news")
-        items = []
-        for r in resp.get("results", []):
-            title = r.get("title", "")
-            if title and isinstance(title, str):
-                items.append({
-                    "title":    title,
-                    "link":     r.get("url", ""),
-                    "summary":  r.get("content", "")[:200],
-                    "pub_date": r.get("published_date", ""),
-                })
-        return items
-    except Exception as e:
-        logging.error(f"Tavily error {topic['name']}: {e}")
-        return []
+    return _to_items(search_news(topic["query"], max_results=5, tavily_key=tavily_key))
 
 
 def is_important(news_items, name, config, recent_text, is_market_topic=False):
