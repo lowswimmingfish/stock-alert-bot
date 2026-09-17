@@ -235,7 +235,12 @@ def web_search(query: str, max_results: int = 5) -> str:
         if tavily_key:
             from tavily import TavilyClient
             client = TavilyClient(api_key=tavily_key)
-            resp = client.search(query, max_results=max_results)
+            try:
+                resp = client.search(query, max_results=max_results)
+            except Exception as e:
+                logging.warning(f"Tavily web_search 실패, DuckDuckGo로 대체: {e}")
+                resp = None
+        if tavily_key and resp is not None:
             lines = []
             for r in resp.get("results", []):
                 lines.append(f"제목: {r.get('title', '')}")
@@ -267,7 +272,12 @@ def news_search(query: str, max_results: int = 5) -> str:
         if tavily_key:
             from tavily import TavilyClient
             client = TavilyClient(api_key=tavily_key)
-            resp = client.search(query, max_results=max_results, topic="news")
+            try:
+                resp = client.search(query, max_results=max_results, topic="news")
+            except Exception as e:
+                logging.warning(f"Tavily news_search 실패, DuckDuckGo로 대체: {e}")
+                resp = None
+        if tavily_key and resp is not None:
             lines = []
             for r in resp.get("results", []):
                 pub = r.get("published_date", "")
@@ -631,32 +641,12 @@ def get_ticker_news(ticker: str) -> str:
 # ──────────────────────────────────────────────
 
 TOOLS = [
+    # Anthropic 서버측 실시간 웹 검색 (Tavily 한도와 무관)
     {
+        "type": "web_search_20260209",
         "name": "web_search",
-        "description": (
-            "실시간 웹 검색. 기업 정보, 시황, 경제 지표 등을 찾을 때 사용. "
-            "Tavily(설정 시) > DuckDuckGo 순으로 자동 사용."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "검색어 (구체적일수록 정확). 영어 권장."},
-                "max_results": {"type": "integer", "default": 5},
-            },
-            "required": ["query"],
-        },
-    },
-    {
-        "name": "news_search",
-        "description": "최신 뉴스 검색. 종목 뉴스, 정책 뉴스, 시장 이슈 등. 영어로 검색하면 더 많은 결과.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "query": {"type": "string", "description": "뉴스 검색어"},
-                "max_results": {"type": "integer", "default": 5},
-            },
-            "required": ["query"],
-        },
+        "max_uses": 5,
+        "user_location": {"type": "approximate", "country": "KR", "timezone": "Asia/Seoul"},
     },
     {
         "name": "fetch_url",
@@ -839,11 +829,7 @@ TOOLS = [
 
 def run_tool(tool_name: str, tool_input: dict) -> str:
     """Execute a tool call and return the result."""
-    if tool_name == "web_search":
-        return web_search(tool_input["query"], tool_input.get("max_results", 5))
-    elif tool_name == "news_search":
-        return news_search(tool_input["query"], tool_input.get("max_results", 5))
-    elif tool_name == "fetch_url":
+    if tool_name == "fetch_url":
         return fetch_url(tool_input["url"])
     elif tool_name == "get_stock_info":
         return get_stock_info(tool_input["ticker"])
@@ -906,8 +892,7 @@ def ask_claude(question, config):
 ## 도구 사용 지침
 정확한 답변을 위해 도구를 적극적으로 사용해:
 
-- **최신 뉴스/이슈** → news_search (영어로 검색하면 더 풍부한 결과)
-- **기업·시황 정보** → web_search
+- **최신 사건·뉴스·이슈, 모르는 내용 전반** → web_search (실시간 웹 검색. 한국 이슈는 한국어, 미국 이슈는 영어로)
 - **기사 전문 확인** → fetch_url (검색에서 찾은 URL을 직접 읽기)
 - **종목 최신 뉴스** → get_ticker_news
 - **PER·EPS·목표가** → get_stock_info
@@ -922,6 +907,8 @@ def ask_claude(question, config):
 - **금리·VIX·달러·금·원유** → get_macro_data
 
 여러 도구를 순서대로 조합해서 깊이 있는 답변을 줘.
+네 학습 데이터 이후의 일(소송 결과, 급등락 이유, 발표, 정책 등)이나 확실히 모르는 내용은 "정보가 없다", "직접 확인해보라"고 답하지 말고 먼저 web_search로 찾아본 뒤, 찾은 사실과 출처를 바탕으로 답해줘. 검색해도 안 나오면 그때 무엇을 검색했는지와 함께 못 찾았다고 말해.
+일반론으로 때우지 말고 실제 원인을 확인해서 답해줘.
 예) get_ticker_news → get_upgrades_downgrades → get_financials → 종합 의견
 
 투자 조언 시 "개인적인 의견이며 투자 판단은 본인 책임"이라는 점을 명시해.
@@ -940,7 +927,7 @@ def ask_claude(question, config):
             try:
                 return client.messages.create(
                     model="claude-sonnet-4-6",
-                    max_tokens=1024,
+                    max_tokens=4096,
                     system=system_prompt,
                     tools=TOOLS,
                     messages=msgs,
@@ -955,6 +942,9 @@ def ask_claude(question, config):
     messages = history.copy()
     while True:
         response = call_claude(messages)
+        for block in response.content:
+            if block.type == "server_tool_use":
+                logging.info(f"Server tool call: {block.name}({block.input})")
 
         # If Claude wants to use a tool
         if response.stop_reason == "tool_use":
@@ -976,11 +966,15 @@ def ask_claude(question, config):
             # Feed results back to Claude
             messages.append({"role": "user", "content": tool_results})
 
+        elif response.stop_reason == "pause_turn":
+            # 서버측 web_search가 길어져 중간에 멈춘 경우: 그대로 이어서 요청
+            messages.append({"role": "assistant", "content": response.content})
+
         else:
             # Final answer
             answer = "".join(
-                block.text for block in response.content if hasattr(block, "text")
-            )
+                block.text for block in response.content if block.type == "text"
+            ).strip() or "답변을 생성하지 못했어요. 다시 질문해주세요."
             # Save to history (user question + final answer only)
             history.append({"role": "assistant", "content": answer})
             save_history(history)
